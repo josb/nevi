@@ -8,7 +8,6 @@ use crossterm::{
     execute, queue,
     style::{
         Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-        SetUnderlineColor,
     },
     terminal::{self, ClearType},
 };
@@ -215,6 +214,54 @@ fn diagnostic_underline_color(
         DiagnosticSeverity::Warning
         | DiagnosticSeverity::Information
         | DiagnosticSeverity::Hint => None,
+    }
+}
+
+fn ansi_underline_color_code(color: Color) -> String {
+    match color {
+        Color::Reset => "59".to_string(),
+        Color::Black => "58:5:0".to_string(),
+        Color::DarkRed => "58:5:1".to_string(),
+        Color::DarkGreen => "58:5:2".to_string(),
+        Color::DarkYellow => "58:5:3".to_string(),
+        Color::DarkBlue => "58:5:4".to_string(),
+        Color::DarkMagenta => "58:5:5".to_string(),
+        Color::DarkCyan => "58:5:6".to_string(),
+        Color::Grey => "58:5:7".to_string(),
+        Color::DarkGrey => "58:5:8".to_string(),
+        Color::Red => "58:5:9".to_string(),
+        Color::Green => "58:5:10".to_string(),
+        Color::Yellow => "58:5:11".to_string(),
+        Color::Blue => "58:5:12".to_string(),
+        Color::Magenta => "58:5:13".to_string(),
+        Color::Cyan => "58:5:14".to_string(),
+        Color::White => "58:5:15".to_string(),
+        Color::Rgb { r, g, b } => format!("58:2:{r}:{g}:{b}"),
+        Color::AnsiValue(value) => format!("58:5:{value}"),
+    }
+}
+
+fn write_ansi_underline_color<W: Write>(writer: &mut W, color: Color) -> io::Result<()> {
+    let code = ansi_underline_color_code(color);
+    write!(writer, "\x1b[{code}m")
+}
+
+fn apply_diagnostic_underline<W: Write>(
+    writer: &mut W,
+    underline_color: Option<Color>,
+    token_fg: Color,
+) -> io::Result<()> {
+    if let Some(color) = underline_color {
+        execute!(
+            writer,
+            SetAttribute(Attribute::Undercurled),
+            SetForegroundColor(token_fg)
+        )?;
+        write_ansi_underline_color(writer, color)
+    } else {
+        execute!(writer, SetAttribute(Attribute::NoUnderline))?;
+        write_ansi_underline_color(writer, Color::Reset)?;
+        execute!(writer, SetForegroundColor(token_fg))
     }
 }
 
@@ -1525,19 +1572,11 @@ impl Terminal {
                 current_italic = desired_italic;
             }
             if desired_underline_color != current_underline_color {
-                if let Some(color) = desired_underline_color {
-                    execute!(
-                        self.stdout,
-                        SetUnderlineColor(color),
-                        SetAttribute(Attribute::Undercurled)
-                    )?;
-                } else {
-                    execute!(
-                        self.stdout,
-                        SetAttribute(Attribute::NoUnderline),
-                        SetUnderlineColor(Color::Reset)
-                    )?;
-                }
+                apply_diagnostic_underline(
+                    &mut self.stdout,
+                    desired_underline_color,
+                    desired_fg,
+                )?;
                 current_underline_color = desired_underline_color;
             }
 
@@ -5263,19 +5302,11 @@ impl Terminal {
                 current_italic = desired_italic;
             }
             if desired_underline_color != current_underline_color {
-                if let Some(color) = desired_underline_color {
-                    execute!(
-                        self.stdout,
-                        SetUnderlineColor(color),
-                        SetAttribute(Attribute::Undercurled)
-                    )?;
-                } else {
-                    execute!(
-                        self.stdout,
-                        SetAttribute(Attribute::NoUnderline),
-                        SetUnderlineColor(Color::Reset)
-                    )?;
-                }
+                apply_diagnostic_underline(
+                    &mut self.stdout,
+                    desired_underline_color,
+                    desired_fg,
+                )?;
                 current_underline_color = desired_underline_color;
             }
 
@@ -8683,7 +8714,7 @@ pub fn execute_leader_action(editor: &mut Editor, action: &LeaderAction) {
 #[cfg(test)]
 mod tests {
     use super::{
-        diagnostic_at_col, diagnostic_underline_color, execute_command,
+        apply_diagnostic_underline, diagnostic_at_col, diagnostic_underline_color, execute_command,
         finder_preview_match_ranges, handle_insert_mode, handle_key, replace_completion_text,
     };
     use crate::commands::Command;
@@ -8777,6 +8808,47 @@ mod tests {
             diagnostic_underline_color(&diag, Color::Rgb { r: 255, g: 0, b: 0 }),
             None
         );
+    }
+
+    #[test]
+    fn diagnostic_underline_keeps_token_foreground_after_enabling() {
+        crossterm::style::force_color_output(true);
+        let mut output = Vec::new();
+        let token_fg = Color::Rgb {
+            r: 97,
+            g: 175,
+            b: 239,
+        };
+
+        apply_diagnostic_underline(
+            &mut output,
+            Some(Color::Rgb { r: 255, g: 0, b: 0 }),
+            token_fg,
+        )
+        .expect("apply underline");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("\x1b[4:3m"));
+        assert!(rendered.contains("\x1b[38;2;97;175;239m"));
+        assert!(rendered.ends_with("\x1b[58:2:255:0:0m"));
+    }
+
+    #[test]
+    fn diagnostic_underline_keeps_token_foreground_after_disabling() {
+        crossterm::style::force_color_output(true);
+        let mut output = Vec::new();
+        let token_fg = Color::Rgb {
+            r: 198,
+            g: 120,
+            b: 221,
+        };
+
+        apply_diagnostic_underline(&mut output, None, token_fg).expect("clear underline");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("\x1b[24m"));
+        assert!(rendered.contains("\x1b[59m"));
+        assert!(rendered.ends_with("\x1b[38;2;198;120;221m"));
     }
 
     #[test]
