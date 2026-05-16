@@ -594,7 +594,7 @@ impl Terminal {
 
     /// Render the editor state to the terminal
     pub fn render(&mut self, editor: &Editor) -> anyhow::Result<()> {
-        self.set_mouse_capture(editor.floating_terminal.is_visible())?;
+        self.set_mouse_capture(Self::should_capture_mouse(editor))?;
         execute!(self.stdout, cursor::MoveTo(0, 0))?;
 
         // Skip rendering background when finder is open - it's a large overlay
@@ -3673,6 +3673,10 @@ impl Terminal {
         Self::markdown_preview_rect(editor).height.saturating_sub(3) as usize
     }
 
+    fn should_capture_mouse(editor: &Editor) -> bool {
+        editor.floating_terminal.is_visible() || editor.markdown_preview.is_some()
+    }
+
     /// Render the diagnostic floating popup (like vim.diagnostic.open_float())
     fn render_diagnostic_float(&mut self, editor: &Editor) -> anyhow::Result<()> {
         let diagnostics = editor.diagnostics_for_line(editor.cursor.line);
@@ -5965,6 +5969,36 @@ fn handle_markdown_preview_key(editor: &mut Editor, key: KeyEvent) {
             editor.scroll_markdown_preview(-half_page, visible_rows)
         }
         _ => {}
+    }
+}
+
+pub fn handle_markdown_preview_mouse(editor: &mut Editor, mouse: MouseEvent) -> bool {
+    use crossterm::event::MouseEventKind;
+
+    if editor.markdown_preview.is_none() {
+        return false;
+    }
+
+    let rect = Terminal::markdown_preview_rect(editor);
+    let inside_preview = mouse.column >= rect.x
+        && mouse.column < rect.x.saturating_add(rect.width)
+        && mouse.row >= rect.y
+        && mouse.row < rect.y.saturating_add(rect.height);
+    if !inside_preview {
+        return false;
+    }
+
+    let visible_rows = Terminal::markdown_preview_visible_rows(editor).max(1);
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            editor.scroll_markdown_preview(-3, visible_rows);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            editor.scroll_markdown_preview(3, visible_rows);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -9122,15 +9156,15 @@ pub fn execute_leader_action(editor: &mut Editor, action: &LeaderAction) {
 mod tests {
     use super::{
         apply_diagnostic_underline, diagnostic_at_col, diagnostic_underline_color, execute_command,
-        finder_preview_match_ranges, handle_insert_mode, handle_key, replace_completion_text,
-        Terminal,
+        finder_preview_match_ranges, handle_insert_mode, handle_key,
+        handle_markdown_preview_mouse, replace_completion_text, Terminal,
     };
     use crate::commands::Command;
     use crate::config::{KeymapEntry, Settings};
     use crate::editor::{Editor, Mode, RegisterContent};
     use crate::input::Motion;
     use crate::lsp::types::{CompletionItem, CompletionKind, Diagnostic, DiagnosticSeverity};
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
     use crossterm::style::Color;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -9368,6 +9402,66 @@ mod tests {
 
         handle_key(&mut editor, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(editor.markdown_preview.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn markdown_preview_mouse_capture_is_enabled_while_overlay_is_open() {
+        let tmp = unique_temp_dir("nevi_markdown_preview_mouse_capture");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let markdown_path = tmp.join("notes.md");
+        std::fs::write(&markdown_path, "# Notes\n").expect("write markdown");
+
+        let mut editor = Editor::default();
+        editor.open_file(markdown_path).expect("open markdown");
+        assert!(!Terminal::should_capture_mouse(&editor));
+
+        editor.open_markdown_preview().expect("open preview");
+        assert!(Terminal::should_capture_mouse(&editor));
+
+        editor.close_markdown_preview();
+        assert!(!Terminal::should_capture_mouse(&editor));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn markdown_preview_mouse_wheel_scrolls_only_inside_the_overlay() {
+        let tmp = unique_temp_dir("nevi_markdown_preview_mouse_wheel");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let markdown_path = tmp.join("notes.md");
+        std::fs::write(&markdown_path, "# Notes\n").expect("write markdown");
+
+        let mut editor = Editor::default();
+        editor.set_size(120, 40);
+        editor.open_file(markdown_path).expect("open markdown");
+        editor.replace_buffer_content(&(0..40).map(|i| format!("line {i}\n")).collect::<String>());
+        editor.open_markdown_preview().expect("open preview");
+
+        let rect = Terminal::markdown_preview_rect(&editor);
+        let inside = MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: rect.x + 1,
+            row: rect.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        let outside = MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(handle_markdown_preview_mouse(&mut editor, inside));
+        assert!(editor.markdown_preview.as_ref().unwrap().scroll > 0);
+
+        let scroll_after_inside = editor.markdown_preview.as_ref().unwrap().scroll;
+        assert!(!handle_markdown_preview_mouse(&mut editor, outside));
+        assert_eq!(
+            editor.markdown_preview.as_ref().unwrap().scroll,
+            scroll_after_inside
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
