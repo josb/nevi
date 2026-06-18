@@ -535,6 +535,12 @@ fn run_worker(
     sink: EventSink,
     error_sink: ErrorSink,
 ) {
+    let (sink_tx, sink_rx) = mpsc::channel::<Vec<FileEvent>>();
+    thread::spawn(move || {
+        for changes in sink_rx {
+            let _ = sink(changes);
+        }
+    });
     let mut state = RegistrationState::default();
     let mut watched_roots = HashSet::new();
     let mut pending = PendingFileEvents::default();
@@ -543,7 +549,7 @@ fn run_worker(
     loop {
         if flush_at.is_some_and(|deadline| Instant::now() >= deadline) {
             if !pending.is_empty() {
-                let _ = sink(pending.drain());
+                deliver_pending(&mut pending, &sink_tx, &error_sink);
             }
             flush_at = None;
             continue;
@@ -598,12 +604,24 @@ fn run_worker(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !pending.is_empty() {
-                    let _ = sink(pending.drain());
+                    deliver_pending(&mut pending, &sink_tx, &error_sink);
                 }
                 flush_at = None;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+fn deliver_pending(
+    pending: &mut PendingFileEvents,
+    sink_tx: &Sender<Vec<FileEvent>>,
+    error_sink: &ErrorSink,
+) {
+    if let Err(error) = sink_tx.send(pending.drain()) {
+        error_sink(format!(
+            "LSP file watcher notification worker stopped: {error}"
+        ));
     }
 }
 
@@ -874,6 +892,51 @@ mod tests {
             result.is_ok(),
             "worker did not flush while events continued"
         );
+    }
+
+    #[test]
+    fn worker_processes_commands_while_notification_sink_is_blocked() {
+        let temp_root = TempWatchRoot::create();
+        let root = temp_root.path.clone();
+        let (sink_started_tx, sink_started_rx) = mpsc::channel();
+        let (release_sink_tx, release_sink_rx) = mpsc::channel::<()>();
+        let mut handle = WatchedFilesHandle::start_with_sink(
+            root.clone(),
+            Box::new(move |_changes| {
+                let _ = sink_started_tx.send(());
+                let _ = release_sink_rx.recv();
+                Ok(())
+            }),
+            Box::new(|_| {}),
+        )
+        .expect("watcher");
+        handle
+            .register(vec![watched_registration("rust-files", &root, "**/*.rs")])
+            .expect("register");
+
+        let command_tx = handle.command_sender();
+        command_tx
+            .send(WatcherCommand::Event(Ok(file_event(
+                root.join("src/main.rs"),
+                EventKind::Create(notify::event::CreateKind::File),
+            ))))
+            .expect("event command");
+        sink_started_rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("sink started");
+
+        let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+        command_tx
+            .send(WatcherCommand::Unregister {
+                registration_ids: vec!["rust-files".to_string()],
+                reply: reply_tx,
+            })
+            .expect("unregister command");
+        let result = reply_rx.recv_timeout(Duration::from_millis(100));
+
+        let _ = release_sink_tx.send(());
+        handle.shutdown();
+        assert!(matches!(result, Ok(Ok(()))));
     }
 
     #[test]

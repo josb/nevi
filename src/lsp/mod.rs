@@ -22,6 +22,8 @@ pub use client::LspClient;
 pub use multi::{LanguageId, MultiLspManager};
 pub use types::*;
 
+const READER_JOIN_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// Manager for the LSP client thread
 pub struct LspManager {
     /// Channel to send requests to the LSP thread
@@ -276,6 +278,15 @@ impl Drop for LspManager {
     }
 }
 
+fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration) -> bool {
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    done_rx.recv_timeout(timeout).is_ok()
+}
+
 /// Run the LSP client thread
 fn run_lsp_thread(
     command: &str,
@@ -524,8 +535,8 @@ fn run_lsp_thread(
 
     watched_files.shutdown();
 
-    // Wait for reader thread to finish (it will exit when stdout closes)
-    let _ = reader_handle.join();
+    // Bounded: stdout readers can wedge if the server ignores shutdown.
+    let _ = join_thread_with_timeout(reader_handle, READER_JOIN_TIMEOUT);
 }
 
 /// Convert a file path to a file:// URI
@@ -583,8 +594,24 @@ fn detect_language(path: &PathBuf) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_language;
+    use super::{detect_language, join_thread_with_timeout};
     use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn reader_thread_join_helper_returns_without_waiting_forever() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+
+        let started = Instant::now();
+        assert!(!join_thread_with_timeout(handle, Duration::from_millis(20)));
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(release_tx);
+    }
 
     #[test]
     fn detect_language_maps_all_routed_lsp_extensions() {

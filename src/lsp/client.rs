@@ -8,6 +8,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use lsp_types::{
@@ -33,6 +34,11 @@ use super::watched_files::{
 /// This is shared between the request sender and response reader threads
 pub type PendingRequests = Arc<Mutex<HashMap<u64, RequestKind>>>;
 pub type SharedStdin = Arc<Mutex<ChildStdin>>;
+
+#[cfg(not(test))]
+const WATCHER_COMMAND_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const WATCHER_COMMAND_REPLY_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// JSON-RPC request message
 #[derive(Debug, Serialize)]
@@ -1042,9 +1048,15 @@ fn send_watcher_command(
     watcher_tx.send(build(reply_tx)).map_err(|error| {
         WatcherRequestError::Setup(format!("failed to send watched-file command: {error}"))
     })?;
-    reply_rx.recv().map_err(|error| {
-        WatcherRequestError::Setup(format!("watched-file worker did not reply: {error}"))
-    })?
+    match reply_rx.recv_timeout(WATCHER_COMMAND_REPLY_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(WatcherRequestError::Setup(
+            "watched-file worker reply timed out".to_string(),
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(WatcherRequestError::Setup(
+            "watched-file worker reply channel closed".to_string(),
+        )),
+    }
 }
 
 fn handle_server_request(
@@ -1926,7 +1938,35 @@ mod tests {
     use super::*;
     use crate::lsp::types::{DiagnosticCode, DiagnosticSeverity};
     use lsp_types::Url;
+    use std::path::Path;
     use std::thread;
+    use std::time::Duration;
+
+    fn watched_file_register_params(root: &Path) -> Option<Value> {
+        Some(json!({
+            "registrations": [{
+                "id": "rust-files",
+                "method": WATCHED_FILES_METHOD,
+                "registerOptions": {
+                    "watchers": [{
+                        "globPattern": {
+                            "baseUri": Url::from_file_path(root).unwrap(),
+                            "pattern": "**/*.rs"
+                        }
+                    }]
+                }
+            }]
+        }))
+    }
+
+    fn watched_file_unregister_params() -> Option<Value> {
+        Some(json!({
+            "unregisterations": [{
+                "id": "rust-files",
+                "method": WATCHED_FILES_METHOD
+            }]
+        }))
+    }
 
     #[test]
     fn code_action_diagnostic_conversion_preserves_multiline_end_line() {
@@ -2022,26 +2062,160 @@ mod tests {
         let response = handle_server_request(
             JsonRpcId::Num(7),
             "client/registerCapability",
-            Some(json!({
-                "registrations": [{
-                    "id": "rust-files",
-                    "method": WATCHED_FILES_METHOD,
-                    "registerOptions": {
-                        "watchers": [{
-                            "globPattern": {
-                                "baseUri": Url::from_file_path(&root).unwrap(),
-                                "pattern": "**/*.rs"
-                            }
-                        }]
-                    }
-                }]
-            })),
+            watched_file_register_params(&root),
             Some(&command_tx),
         )
         .expect("response");
 
         worker.join().unwrap();
         assert!(response.contains("\"result\":null"));
+    }
+
+    #[test]
+    fn watched_file_unregistration_is_forwarded_before_success_response() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let worker = thread::spawn(move || match command_rx.recv().expect("watcher command") {
+            WatcherCommand::Unregister {
+                registration_ids,
+                reply,
+            } => {
+                assert_eq!(registration_ids, vec!["rust-files".to_string()]);
+                reply.send(Ok(())).unwrap();
+            }
+            other => panic!("unexpected command: {other:?}"),
+        });
+
+        let response = handle_server_request(
+            JsonRpcId::Num(9),
+            "client/unregisterCapability",
+            watched_file_unregister_params(),
+            Some(&command_tx),
+        )
+        .expect("response");
+
+        worker.join().unwrap();
+        assert!(response.contains("\"result\":null"));
+    }
+
+    #[test]
+    fn unrelated_dynamic_registration_requests_do_not_touch_watcher() {
+        let (command_tx, command_rx) = mpsc::channel();
+
+        let register_response = handle_server_request(
+            JsonRpcId::Num(10),
+            "client/registerCapability",
+            Some(json!({
+                "registrations": [{
+                    "id": "configuration",
+                    "method": "workspace/didChangeConfiguration"
+                }]
+            })),
+            Some(&command_tx),
+        )
+        .expect("register response");
+
+        let unregister_response = handle_server_request(
+            JsonRpcId::Num(11),
+            "client/unregisterCapability",
+            Some(json!({
+                "unregisterations": [{
+                    "id": "configuration",
+                    "method": "workspace/didChangeConfiguration"
+                }]
+            })),
+            Some(&command_tx),
+        )
+        .expect("unregister response");
+
+        assert!(register_response.contains("\"result\":null"));
+        assert!(unregister_response.contains("\"result\":null"));
+        assert!(command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn watcher_setup_error_returns_internal_error() {
+        let root = std::env::temp_dir();
+        let (command_tx, command_rx) = mpsc::channel();
+        let worker = thread::spawn(move || match command_rx.recv().expect("watcher command") {
+            WatcherCommand::Register { reply, .. } => {
+                reply
+                    .send(Err(WatcherRequestError::Setup(
+                        "watch setup failed".to_string(),
+                    )))
+                    .unwrap();
+            }
+            other => panic!("unexpected command: {other:?}"),
+        });
+
+        let response = handle_server_request(
+            JsonRpcId::Num(12),
+            "client/registerCapability",
+            watched_file_register_params(&root),
+            Some(&command_tx),
+        )
+        .expect("response");
+
+        worker.join().unwrap();
+        assert!(response.contains("\"code\":-32603"));
+    }
+
+    #[test]
+    fn missing_or_closed_watcher_sender_returns_internal_error() {
+        let root = std::env::temp_dir();
+        let missing_response = handle_server_request(
+            JsonRpcId::Num(13),
+            "client/registerCapability",
+            watched_file_register_params(&root),
+            None,
+        )
+        .expect("missing watcher response");
+
+        let (command_tx, command_rx) = mpsc::channel();
+        drop(command_rx);
+        let closed_response = handle_server_request(
+            JsonRpcId::Num(14),
+            "client/registerCapability",
+            watched_file_register_params(&root),
+            Some(&command_tx),
+        )
+        .expect("closed watcher response");
+
+        assert!(missing_response.contains("\"code\":-32603"));
+        assert!(closed_response.contains("\"code\":-32603"));
+    }
+
+    #[test]
+    fn watcher_reply_timeout_returns_internal_error() {
+        let root = std::env::temp_dir();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = thread::spawn(move || match command_rx.recv().expect("watcher command") {
+            WatcherCommand::Register { reply, .. } => {
+                let _reply = reply;
+                let _ = release_rx.recv();
+            }
+            other => panic!("unexpected command: {other:?}"),
+        });
+        let (done_tx, done_rx) = mpsc::channel();
+        let request_tx = command_tx.clone();
+        let requester = thread::spawn(move || {
+            let response = handle_server_request(
+                JsonRpcId::Num(15),
+                "client/registerCapability",
+                watched_file_register_params(&root),
+                Some(&request_tx),
+            )
+            .expect("response");
+            done_tx.send(response).unwrap();
+        });
+
+        let result = done_rx.recv_timeout(Duration::from_millis(200));
+        let _ = release_tx.send(());
+        worker.join().unwrap();
+        requester.join().unwrap();
+        let response = result.expect("watcher routing should time out");
+
+        assert!(response.contains("\"code\":-32603"));
     }
 
     #[test]
