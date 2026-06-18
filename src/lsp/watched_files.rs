@@ -238,12 +238,13 @@ fn event_changes(event: &Event) -> Vec<(PathBuf, FileChangeType)> {
             .cloned()
             .map(|path| (path, FileChangeType::DELETED))
             .collect(),
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() >= 2 => {
-            vec![
-                (event.paths[0].clone(), FileChangeType::DELETED),
-                (event.paths[1].clone(), FileChangeType::CREATED),
-            ]
-        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => match event.paths.as_slice() {
+            [from, to] => vec![
+                (from.clone(), FileChangeType::DELETED),
+                (to.clone(), FileChangeType::CREATED),
+            ],
+            _ => Vec::new(),
+        },
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => event
             .paths
             .iter()
@@ -285,8 +286,9 @@ fn write_notification(stdin: &SharedStdin, changes: Vec<FileEvent>) -> Result<()
     Ok(())
 }
 
-// Task 2 intentionally lands parser/matcher foundations before Tasks 4 and 5
-// wire them into the runtime watcher and dynamic-registration routing.
+// Tasks 2 and 3 intentionally stage parser/matcher and event-conversion
+// foundations before Tasks 4 and 5 wire them into the runtime watcher and
+// dynamic-registration routing.
 const _: fn(
     Option<serde_json::Value>,
 ) -> std::result::Result<Vec<WatchedFileRegistration>, WatcherRequestError> =
@@ -545,6 +547,29 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn rename_both_with_unexpected_path_count_is_ignored() {
+        let malformed_paths = [
+            vec![],
+            vec![PathBuf::from("/tmp/nevi-watch-root/src/only.rs")],
+            vec![
+                PathBuf::from("/tmp/nevi-watch-root/src/old.rs"),
+                PathBuf::from("/tmp/nevi-watch-root/src/new.rs"),
+                PathBuf::from("/tmp/nevi-watch-root/src/extra.rs"),
+            ],
+        ];
+
+        for paths in malformed_paths {
+            let event = Event {
+                kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                paths,
+                attrs: Default::default(),
+            };
+
+            assert_eq!(event_changes(&event), Vec::new());
+        }
     }
 
     #[test]
