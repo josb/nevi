@@ -24,6 +24,7 @@ use super::client::SharedStdin;
 use super::types::LspNotification;
 
 pub(crate) const WATCHED_FILES_METHOD: &str = "workspace/didChangeWatchedFiles";
+const WATCHER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub(crate) enum WatcherRequestError {
@@ -105,7 +106,8 @@ impl RegistrationState {
     }
 
     fn matching_events(&self, event: &Event) -> Vec<FileEvent> {
-        let mut deduplicated = HashMap::<(String, u32), FileEvent>::new();
+        let mut changes = Vec::new();
+        let mut seen = HashSet::new();
 
         for (path, change) in event_changes(event) {
             if !self
@@ -119,13 +121,12 @@ impl RegistrationState {
             let Ok(uri) = Url::from_file_path(&path) else {
                 continue;
             };
-            deduplicated.insert(
-                (uri.to_string(), file_change_code(change)),
-                FileEvent::new(uri, change),
-            );
+            if seen.insert((uri.to_string(), file_change_code(change))) {
+                changes.push(FileEvent::new(uri, change));
+            }
         }
 
-        deduplicated.into_values().collect()
+        changes
     }
 }
 
@@ -175,6 +176,30 @@ fn file_change_code(change: FileChangeType) -> u32 {
         2
     } else {
         3
+    }
+}
+
+#[derive(Default)]
+struct PendingFileEvents {
+    events: Vec<FileEvent>,
+    seen: HashSet<(String, u32)>,
+}
+
+impl PendingFileEvents {
+    fn insert(&mut self, event: FileEvent) {
+        let key = (event.uri.to_string(), file_change_code(event.typ));
+        if self.seen.insert(key) {
+            self.events.push(event);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    fn drain(&mut self) -> Vec<FileEvent> {
+        self.seen.clear();
+        self.events.drain(..).collect()
     }
 }
 
@@ -469,8 +494,8 @@ impl WatchedFilesHandle {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.tx.send(build(reply_tx))?;
         reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|error| anyhow!("watcher worker did not reply: {error}"))?
+            .recv()
+            .map_err(|error| anyhow!("watcher worker reply channel closed: {error}"))?
             .map_err(|error| anyhow!(error.to_string()))
     }
 
@@ -482,10 +507,24 @@ impl WatchedFilesHandle {
     }
 
     pub(crate) fn shutdown(&mut self) {
+        if self.join.is_none() {
+            return;
+        }
         let _ = self.tx.send(WatcherCommand::Shutdown);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            let (done_tx, done_rx) = mpsc::sync_channel(1);
+            thread::spawn(move || {
+                let _ = join.join();
+                let _ = done_tx.send(());
+            });
+            let _ = done_rx.recv_timeout(WATCHER_SHUTDOWN_TIMEOUT);
         }
+    }
+}
+
+impl Drop for WatchedFilesHandle {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -498,10 +537,18 @@ fn run_worker(
 ) {
     let mut state = RegistrationState::default();
     let mut watched_roots = HashSet::new();
-    let mut pending = HashMap::<(String, u32), FileEvent>::new();
+    let mut pending = PendingFileEvents::default();
     let mut flush_at: Option<Instant> = None;
 
     loop {
+        if flush_at.is_some_and(|deadline| Instant::now() >= deadline) {
+            if !pending.is_empty() {
+                let _ = sink(pending.drain());
+            }
+            flush_at = None;
+            continue;
+        }
+
         let timeout = flush_at
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             .unwrap_or(Duration::from_secs(3600));
@@ -540,10 +587,7 @@ fn run_worker(
             Ok(WatcherCommand::Shutdown) => break,
             Ok(WatcherCommand::Event(Ok(event))) => {
                 for change in state.matching_events(&event) {
-                    pending.insert(
-                        (change.uri.to_string(), file_change_code(change.typ)),
-                        change,
-                    );
+                    pending.insert(change);
                 }
                 if !pending.is_empty() && flush_at.is_none() {
                     flush_at = Some(Instant::now() + Duration::from_millis(50));
@@ -554,8 +598,7 @@ fn run_worker(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if !pending.is_empty() {
-                    let changes = pending.drain().map(|(_, event)| event).collect();
-                    let _ = sink(changes);
+                    let _ = sink(pending.drain());
                 }
                 flush_at = None;
             }
@@ -666,6 +709,173 @@ mod tests {
         }
     }
 
+    fn file_event(path: PathBuf, kind: EventKind) -> Event {
+        Event {
+            kind,
+            paths: vec![path],
+            attrs: Default::default(),
+        }
+    }
+
+    struct TempWatchRoot {
+        path: PathBuf,
+    }
+
+    impl TempWatchRoot {
+        fn create() -> Self {
+            static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+            let path = std::env::temp_dir().join(format!(
+                "nevi-watched-files-{}-{}",
+                std::process::id(),
+                NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(path.join("src")).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempWatchRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn request_waits_for_delayed_worker_reply() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let handle = WatchedFilesHandle {
+            tx: command_tx,
+            join: None,
+        };
+
+        let worker = thread::spawn(move || match command_rx.recv().expect("request command") {
+            WatcherCommand::Register { reply, .. } => {
+                thread::sleep(Duration::from_millis(2_200));
+                let _ = reply.send(Ok(()));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        });
+
+        let result = handle.request(|reply| WatcherCommand::Register {
+            registrations: Vec::new(),
+            reply,
+        });
+
+        worker.join().expect("worker joined");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn shutdown_returns_without_waiting_forever_for_worker_thread() {
+        let (command_tx, _command_rx) = mpsc::channel();
+        let join = thread::spawn(|| {
+            thread::sleep(Duration::from_secs(1));
+        });
+        let mut handle = WatchedFilesHandle {
+            tx: command_tx,
+            join: Some(join),
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            handle.shutdown();
+            let _ = done_tx.send(());
+        });
+
+        assert!(done_rx.recv_timeout(Duration::from_millis(500)).is_ok());
+    }
+
+    #[test]
+    fn dropping_handle_requests_worker_shutdown() {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let saw_shutdown = matches!(command_rx.recv(), Ok(WatcherCommand::Shutdown));
+            let _ = seen_tx.send(saw_shutdown);
+        });
+
+        let handle = WatchedFilesHandle {
+            tx: command_tx,
+            join: Some(join),
+        };
+        drop(handle);
+
+        assert_eq!(seen_rx.recv_timeout(Duration::from_millis(500)), Ok(true));
+    }
+
+    #[test]
+    fn matching_events_preserves_rename_delete_then_create_order() {
+        let root = PathBuf::from("/tmp/nevi-watch-root");
+        let mut state = RegistrationState::default();
+        state
+            .register(
+                vec![watched_registration("rust-files", &root, "**/*.rs")],
+                &root,
+            )
+            .expect("register");
+        let old_path = root.join("src/old.rs");
+        let new_path = root.join("src/new.rs");
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            paths: vec![old_path.clone(), new_path.clone()],
+            attrs: Default::default(),
+        };
+
+        let changes = state.matching_events(&event);
+
+        let paths = changes
+            .iter()
+            .map(|event| event.uri.to_file_path().expect("file path"))
+            .collect::<Vec<_>>();
+        let kinds = changes.iter().map(|event| event.typ).collect::<Vec<_>>();
+        assert_eq!(paths, vec![old_path, new_path]);
+        assert_eq!(
+            kinds,
+            vec![FileChangeType::DELETED, FileChangeType::CREATED]
+        );
+    }
+
+    #[test]
+    fn worker_flushes_due_batch_while_events_keep_arriving() {
+        let root = PathBuf::from("/tmp/nevi-watch-root");
+        let (events_tx, events_rx) = mpsc::channel();
+        let mut handle = WatchedFilesHandle::start_with_sink(
+            root.clone(),
+            Box::new(move |changes| {
+                events_tx
+                    .send(changes)
+                    .map_err(|error| anyhow!(error.to_string()))
+            }),
+            Box::new(|_| {}),
+        )
+        .expect("watcher");
+        handle
+            .register(vec![watched_registration("rust-files", &root, "**/*.rs")])
+            .expect("register");
+
+        let command_tx = handle.command_sender();
+        let path = root.join("src/main.rs");
+        let producer = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(350);
+            while Instant::now() < deadline {
+                let _ = command_tx.send(WatcherCommand::Event(Ok(file_event(
+                    path.clone(),
+                    EventKind::Create(notify::event::CreateKind::File),
+                ))));
+            }
+        });
+
+        let result = events_rx.recv_timeout(Duration::from_millis(250));
+
+        producer.join().expect("producer joined");
+        handle.shutdown();
+        assert!(
+            result.is_ok(),
+            "worker did not flush while events continued"
+        );
+    }
+
     #[test]
     fn registration_state_adds_and_removes_registration_by_id() {
         let root = PathBuf::from("/tmp/nevi-watch-root");
@@ -687,14 +897,8 @@ mod tests {
 
     #[test]
     fn worker_emits_matching_changes_and_ignores_unrelated_files() {
-        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-        let root = std::env::temp_dir().join(format!(
-            "nevi-watched-files-{}-{}",
-            std::process::id(),
-            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(root.join("src")).unwrap();
+        let temp_root = TempWatchRoot::create();
+        let root = temp_root.path.clone();
 
         let (events_tx, events_rx) = mpsc::channel();
         let mut handle = WatchedFilesHandle::start_with_sink(
@@ -726,7 +930,6 @@ mod tests {
         }));
 
         handle.shutdown();
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
