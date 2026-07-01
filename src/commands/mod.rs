@@ -157,6 +157,8 @@ pub enum Command {
     Keymaps,
     /// :checkhealth - Open the editor health report
     CheckHealth,
+    /// :FlightRecorder - Open recent performance timing report
+    FlightRecorder,
     /// :ConfigOpen - Open the user config file
     ConfigOpen,
     /// :ConfigDefaults - Open the latest default config template
@@ -640,6 +642,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         takes_args: false,
     },
     CommandSpec {
+        command: "FlightRecorder",
+        aliases: &["flightrecorder", "flight", "WhySlow", "whyslow"],
+        description: "Open recent performance timing report",
+        takes_args: false,
+    },
+    CommandSpec {
         command: "ConfigOpen",
         aliases: &["configopen", "config", "ConfigEdit", "configedit"],
         description: "Open user config file",
@@ -1085,6 +1093,9 @@ pub fn parse_command(input: &str) -> Command {
         "Themes" | "themes" => Command::Themes,
         "Keymaps" | "keymaps" | "keys" => Command::Keymaps,
         "checkhealth" | "CheckHealth" | "Health" | "health" => Command::CheckHealth,
+        "FlightRecorder" | "flightrecorder" | "flight" | "WhySlow" | "whyslow" => {
+            Command::FlightRecorder
+        }
         "ConfigOpen" | "configopen" | "config" | "ConfigEdit" | "configedit" => Command::ConfigOpen,
         "ConfigDefaults" | "configdefaults" | "defaults" => Command::ConfigDefaults,
 
@@ -1958,6 +1969,23 @@ mod tests {
         assert!(
             rows.iter().any(|(name, _)| name == ":checkhealth"),
             "expected :checkhealth in command cheatsheet rows"
+        );
+    }
+
+    #[test]
+    fn flight_recorder_commands_are_parseable_and_listed() {
+        assert!(matches!(
+            parse_command("FlightRecorder"),
+            Command::FlightRecorder
+        ));
+        assert!(matches!(parse_command("flight"), Command::FlightRecorder));
+        assert!(matches!(parse_command("WhySlow"), Command::FlightRecorder));
+        assert!(matches!(parse_command("whyslow"), Command::FlightRecorder));
+
+        let rows = command_cheatsheet_rows();
+        assert!(
+            rows.iter().any(|(name, _)| name == ":FlightRecorder"),
+            "expected :FlightRecorder in command cheatsheet rows"
         );
     }
 

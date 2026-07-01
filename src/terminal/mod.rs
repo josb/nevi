@@ -9875,6 +9875,10 @@ fn execute_command(editor: &mut Editor, cmd: Command) {
             editor.open_health_report();
             CommandResult::Ok
         }
+        Command::FlightRecorder => {
+            editor.open_flight_recorder_report();
+            CommandResult::Ok
+        }
         Command::ConfigOpen => match editor.open_user_config_file() {
             Ok(path) => CommandResult::Message(format!("Opened config: {}", path.display())),
             Err(message) => CommandResult::Error(message),
@@ -10943,6 +10947,25 @@ mod tests {
         assert!(text.contains("Keymaps"));
         assert!(text.contains("Performance"));
         assert!(text.contains("LSP"));
+    }
+
+    #[test]
+    fn flight_recorder_command_opens_flight_report_buffer() {
+        let mut editor = Editor::default();
+        editor
+            .flight_recorder
+            .record("handle_key", Duration::from_micros(1_500));
+
+        execute_command(&mut editor, Command::FlightRecorder);
+
+        assert!(editor.markdown_preview.is_none());
+        assert_eq!(editor.buffer().display_name(), "[flight-recorder]");
+        assert!(editor.buffer().is_read_only());
+        assert!(!editor.buffer().dirty);
+        let text = editor.buffer().content();
+        assert!(text.contains("Nevi Flight Recorder"));
+        assert!(text.contains("handle_key"));
+        assert!(text.contains("slow"));
     }
 
     #[test]

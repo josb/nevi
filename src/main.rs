@@ -181,9 +181,10 @@ fn main() -> anyhow::Result<()> {
             }
         };
     }
-    macro_rules! profile_metric {
-        ($stats:expr, $file:expr, $name:literal, $duration:expr) => {{
+    macro_rules! record_metric {
+        ($editor:expr, $stats:expr, $file:expr, $name:literal, $duration:expr) => {{
             let elapsed = $duration;
+            $editor.flight_recorder.record($name, elapsed);
             if profile_enabled {
                 if let Some(ref mut stats) = $stats {
                     stats.record($name, elapsed);
@@ -392,7 +393,13 @@ fn main() -> anyhow::Result<()> {
         // Track loop cycle time
         let cycle_time = loop_start.elapsed();
         if cycle_time.as_millis() > 100 {
-            profile_metric!(profile_stats, profile_file, "slow_cycle", cycle_time);
+            record_metric!(
+                editor,
+                profile_stats,
+                profile_file,
+                "slow_cycle",
+                cycle_time
+            );
         }
         loop_start = Instant::now();
 
@@ -555,7 +562,7 @@ fn main() -> anyhow::Result<()> {
                         key_went_to_terminal =
                             terminal_visible_before_key && editor.floating_terminal.is_visible();
                         let elapsed = t_handle_key.elapsed();
-                        profile_metric!(profile_stats, profile_file, "handle_key", elapsed);
+                        record_metric!(editor, profile_stats, profile_file, "handle_key", elapsed);
                         // Only log slow handle_key operations (>1ms) with details
                         if elapsed.as_micros() > 1000 {
                             profile!(
@@ -1031,7 +1038,8 @@ fn main() -> anyhow::Result<()> {
             let t_syntax = Instant::now();
             let syntax_updated = editor.maybe_update_syntax_debounced(debounce);
             if syntax_updated {
-                profile_metric!(
+                record_metric!(
+                    editor,
                     profile_stats,
                     profile_file,
                     "syntax_update",
@@ -1520,6 +1528,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Log if LSP processing was slow
                 let lsp_elapsed = t_lsp_poll.elapsed();
+                if lsp_notification_count > 0 {
+                    record_metric!(editor, profile_stats, profile_file, "lsp_poll", lsp_elapsed);
+                }
                 if lsp_elapsed.as_millis() > 50 || lsp_notification_count > 10 {
                     profile!(
                         profile_file,
@@ -1600,6 +1611,15 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Log if Copilot processing was slow
                 let copilot_elapsed = t_copilot_poll.elapsed();
+                if copilot_count > 0 {
+                    record_metric!(
+                        editor,
+                        profile_stats,
+                        profile_file,
+                        "copilot_poll",
+                        copilot_elapsed
+                    );
+                }
                 if copilot_elapsed.as_millis() > 50 || copilot_count > 5 {
                     profile!(
                         profile_file,
@@ -1710,6 +1730,13 @@ fn main() -> anyhow::Result<()> {
                     editor.finder.preview_update_pending = false;
                     preview_pending_since = None;
                     needs_redraw = true;
+                    record_metric!(
+                        editor,
+                        profile_stats,
+                        profile_file,
+                        "finder_preview",
+                        t_preview.elapsed()
+                    );
                     profile!(
                         profile_file,
                         "preview_update (debounced): {:?}",
@@ -1737,6 +1764,13 @@ fn main() -> anyhow::Result<()> {
                     editor.finder.execute_grep_search();
                     grep_pending_since = None;
                     needs_redraw = true;
+                    record_metric!(
+                        editor,
+                        profile_stats,
+                        profile_file,
+                        "finder_grep",
+                        t_grep.elapsed()
+                    );
                     profile!(
                         profile_file,
                         "grep_search (debounced): {:?}",
@@ -1791,7 +1825,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 let t_render = Instant::now();
                 terminal.render(&editor)?;
-                profile_metric!(profile_stats, profile_file, "render", t_render.elapsed());
+                record_metric!(
+                    editor,
+                    profile_stats,
+                    profile_file,
+                    "render",
+                    t_render.elapsed()
+                );
                 needs_redraw = false;
                 terminal_redraw_pending = false;
                 last_render = now;
@@ -1803,7 +1843,8 @@ fn main() -> anyhow::Result<()> {
                 editor.sync_floating_terminal_size();
                 let t_render = Instant::now();
                 terminal.render_terminal_only(&editor)?;
-                profile_metric!(
+                record_metric!(
+                    editor,
                     profile_stats,
                     profile_file,
                     "terminal_render",

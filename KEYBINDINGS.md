@@ -943,6 +943,7 @@ for example `:ProjectReplace#/api/v1#/api/v2#g`.
 | `:Theme {name}` / `:theme {name}` / `:colorscheme {name}` | Set theme |
 | `:LazyGit` / `:lg` | Open lazygit |
 | `:checkhealth` / `:CheckHealth` / `:Health` | Open read-only `[health]` report with config, keymap, profiling, LSP, and external tools |
+| `:FlightRecorder` / `:WhySlow` / `:flight` | Open read-only `[flight-recorder]` report with recent in-memory timing events |
 | `:ConfigOpen` / `:config` / `:configopen` | Open the user config file, creating it first if needed |
 | `:ConfigDefaults` / `:configdefaults` | Open read-only `[config-defaults]` buffer with latest built-in default config |
 | `:!{command}` | Run external shell command |

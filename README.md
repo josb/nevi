@@ -146,6 +146,7 @@ nevi file1.rs file2.rs
 - `:q` - Quit
 - `:wq` - Save and quit
 - `:checkhealth` / `:Health` - Open editor health report in a read-only `[health]` buffer
+- `:FlightRecorder` / `:WhySlow` - Open recent in-memory timing report in a read-only `[flight-recorder]` buffer
 - `:ConfigOpen` / `:config` - Open your user config file
 - `:ConfigDefaults` - View the latest built-in default config in a read-only `[config-defaults]` buffer
 - `:MarkdownPreview` - Open rendered Markdown reader for `.md` files (`j/k`, `Ctrl-d/u`, `g/G`, `q`)
@@ -353,8 +354,12 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ### Performance Profiling
 
-Profiling is opt-in and disabled by default. To capture hot-path timings while
-using Nevi locally:
+Nevi keeps a small in-memory flight recorder for recent hot-path timings. Run
+`:FlightRecorder` or `:WhySlow` to open a read-only `[flight-recorder]` buffer
+with recent render, input, syntax, LSP, finder, and terminal timing events.
+
+Verbose file profiling is opt-in and disabled by default. To capture raw timing
+events while using Nevi locally:
 
 ```bash
 NEVI_PROFILE=1 cargo run --release -- path/to/file

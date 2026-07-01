@@ -1036,6 +1036,8 @@ pub struct Editor {
     pub theme_picker: Option<ThemePicker>,
     /// Floating rendered Markdown preview state.
     pub markdown_preview: Option<crate::markdown_preview::MarkdownPreviewState>,
+    /// Recent in-memory performance timing events.
+    pub flight_recorder: crate::perf::FlightRecorder,
     /// Last project-wide replace preview, pending explicit apply.
     project_replace_preview: Option<crate::project_replace::ProjectReplacePreview>,
     /// Marks for navigation (m{a-z}, '{a-z}, `{a-z})
@@ -1533,6 +1535,7 @@ impl Editor {
             theme_manager,
             theme_picker: None,
             markdown_preview: None,
+            flight_recorder: crate::perf::FlightRecorder::default(),
             project_replace_preview: None,
             marks: Marks::new(),
             last_visual_selection: None,
@@ -1733,6 +1736,16 @@ impl Editor {
     pub fn open_health_report(&mut self) {
         let report = crate::health::collect_health_report(&self.settings, &self.languages_config);
         self.open_virtual_read_only_buffer("[health]", &report, Some("health.md"));
+    }
+
+    /// Open recent performance timings in a read-only virtual buffer.
+    pub fn open_flight_recorder_report(&mut self) {
+        let report = self.flight_recorder.render_report();
+        self.open_virtual_read_only_buffer(
+            "[flight-recorder]",
+            &report,
+            Some("flight-recorder.md"),
+        );
     }
 
     /// Build a project-wide replace preview and open it as a read-only buffer.
@@ -10543,6 +10556,26 @@ mod tests {
         assert!(content.contains("## Keymaps"));
         assert!(content.contains("## Performance"));
         assert!(content.contains("## LSP"));
+    }
+
+    #[test]
+    fn flight_recorder_report_opens_as_read_only_virtual_buffer() {
+        let mut editor = Editor::default();
+        editor
+            .flight_recorder
+            .record("render", Duration::from_micros(18_000));
+
+        editor.open_flight_recorder_report();
+
+        assert!(editor.markdown_preview.is_none());
+        assert_eq!(editor.buffer().display_name(), "[flight-recorder]");
+        assert!(editor.buffer().is_read_only());
+        assert!(editor.buffer().path.is_none());
+        assert!(!editor.buffer().dirty);
+        let content = editor.buffer().content();
+        assert!(content.contains("# Nevi Flight Recorder"));
+        assert!(content.contains("render"));
+        assert!(content.contains("slow"));
     }
 
     #[test]
