@@ -1040,6 +1040,8 @@ pub struct Editor {
     pub flight_recorder: crate::perf::FlightRecorder,
     /// Last project-wide replace preview, pending explicit apply.
     project_replace_preview: Option<crate::project_replace::ProjectReplacePreview>,
+    /// Active labeled jump state, if the user is choosing a visible target.
+    pub labeled_jump: Option<crate::labeled_jump::LabeledJumpState>,
     /// Marks for navigation (m{a-z}, '{a-z}, `{a-z})
     pub marks: Marks,
     /// Last visual selection for gv command
@@ -1537,6 +1539,7 @@ impl Editor {
             markdown_preview: None,
             flight_recorder: crate::perf::FlightRecorder::default(),
             project_replace_preview: None,
+            labeled_jump: None,
             marks: Marks::new(),
             last_visual_selection: None,
             pending_visual_block_edit: None,
@@ -1920,6 +1923,147 @@ impl Editor {
             crate::config::default_config_template_text(),
             Some("config.toml"),
         );
+    }
+
+    /// Start labeled jump navigation over the currently visible editor text.
+    pub fn start_labeled_jump(&mut self) {
+        self.labeled_jump = Some(crate::labeled_jump::LabeledJumpState::new());
+        self.set_status("Jump: type 2 chars, label to jump, Esc cancels");
+    }
+
+    /// Cancel the active labeled jump prompt.
+    pub fn cancel_labeled_jump(&mut self) {
+        self.labeled_jump = None;
+        self.set_status("Jump cancelled");
+    }
+
+    /// Add one character to the labeled jump query and refresh visible targets.
+    pub fn push_labeled_jump_query_char(&mut self, ch: char) {
+        let Some(state) = self.labeled_jump.as_mut() else {
+            return;
+        };
+
+        if state.query.chars().count() >= 2 {
+            self.set_status("Jump: press a label or Esc");
+            return;
+        }
+
+        state.query.push(ch);
+        let query = state.query.clone();
+        let targets = self.collect_labeled_jump_targets(&query);
+
+        if let Some(state) = self.labeled_jump.as_mut() {
+            state.targets = targets;
+        }
+
+        self.set_labeled_jump_status();
+    }
+
+    /// Remove one character from the labeled jump query.
+    pub fn pop_labeled_jump_query_char(&mut self) {
+        let Some(state) = self.labeled_jump.as_mut() else {
+            return;
+        };
+
+        state.query.pop();
+        let query = state.query.clone();
+        let targets = self.collect_labeled_jump_targets(&query);
+
+        if let Some(state) = self.labeled_jump.as_mut() {
+            state.targets = targets;
+        }
+
+        self.set_labeled_jump_status();
+    }
+
+    /// Jump to the target assigned to a label, if one exists.
+    pub fn select_labeled_jump_label(&mut self, label: char) -> bool {
+        let target = self
+            .labeled_jump
+            .as_ref()
+            .and_then(|state| state.target_for_label(label).cloned());
+        let Some(target) = target else {
+            self.set_status(format!("Jump: no target for label '{}'", label));
+            return false;
+        };
+
+        self.record_jump();
+        self.cursor.line = target.line;
+        self.cursor.col = target.col;
+        self.clamp_cursor();
+        self.scroll_to_cursor();
+        self.labeled_jump = None;
+        self.set_status("Jumped");
+        true
+    }
+
+    /// Labels that should be drawn over one visible line.
+    pub fn labeled_jump_labels_for_line(&self, line: usize) -> Vec<(usize, char)> {
+        self.labeled_jump
+            .as_ref()
+            .map(|state| {
+                state
+                    .targets
+                    .iter()
+                    .filter_map(|target| {
+                        (target.line == line).then_some((target.col, target.label))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn collect_labeled_jump_targets(
+        &self,
+        query: &str,
+    ) -> Vec<crate::labeled_jump::LabeledJumpTarget> {
+        let lines: Vec<String> = (0..self.buffer().len_lines())
+            .filter_map(|idx| {
+                self.buffer()
+                    .line(idx)
+                    .map(|line| line.to_string().trim_end_matches('\n').to_string())
+            })
+            .collect();
+        let (viewport_offset, visible_rows) = self.labeled_jump_visible_region();
+        crate::labeled_jump::collect_visible_targets(&lines, viewport_offset, visible_rows, query)
+    }
+
+    fn labeled_jump_visible_region(&self) -> (usize, usize) {
+        let Some(pane) = self.panes.get(self.active_pane) else {
+            return (self.viewport_offset, self.text_rows());
+        };
+
+        let rows = if pane.rect.height == 0 {
+            self.text_rows()
+        } else {
+            pane.rect.height as usize
+        };
+
+        (pane.viewport_offset, rows)
+    }
+
+    fn set_labeled_jump_status(&mut self) {
+        let Some(state) = self.labeled_jump.as_ref() else {
+            return;
+        };
+
+        if state.query.is_empty() {
+            self.set_status("Jump: type 2 chars, label to jump, Esc cancels");
+        } else if state.targets.is_empty() {
+            self.set_status(format!("Jump: no matches for `{}`", state.query));
+        } else if state.query.chars().count() < 2 {
+            self.set_status(format!(
+                "Jump: `{}` {} target(s), type next char",
+                state.query,
+                state.targets.len()
+            ));
+        } else {
+            self.set_status(format!(
+                "Jump: `{}` {} target(s), press label",
+                state.query,
+                state.targets.len()
+            ));
+        }
     }
 
     /// Close the floating Markdown preview.

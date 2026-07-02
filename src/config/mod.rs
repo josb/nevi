@@ -370,6 +370,11 @@ impl Default for KeymapSettings {
                     desc: Some("Search word under cursor".to_string()),
                 },
                 LeaderMapping {
+                    key: "j".to_string(),
+                    action: ":Jump".to_string(),
+                    desc: Some("Labeled jump".to_string()),
+                },
+                LeaderMapping {
                     key: "fb".to_string(),
                     action: ":FindBuffers".to_string(),
                     desc: Some("Find buffers".to_string()),
@@ -1253,6 +1258,7 @@ fn default_config_template() -> &'static str {
 # <leader>fg       - Live grep
 # <leader>fl       - Find lines in current buffer
 # <leader>sw       - Search word under cursor (grep)
+# <leader>j        - Labeled jump to visible text
 # <leader>fb       - Find buffers
 # <leader>ft       - Theme picker
 # <leader>tt       - Terminal picker
@@ -1347,6 +1353,18 @@ fn default_config_template() -> &'static str {
 # key = "md"
 # action = ":MarkdownPreview"
 # desc = "Open Markdown preview"
+#
+# Example: move labeled jump from <leader>j to <leader>s
+# [[keymap.leader_mappings]]
+# key = "s"
+# action = ":Jump"
+# desc = "Labeled jump"
+#
+# Example: use plain `s` for labeled jump.
+# This overrides Vim's default `s` substitute behavior.
+# [[keymap.normal]]
+# from = "s"
+# to = ":Jump<CR>"
 #
 # To override command-mode command-line UX bindings:
 # [[keymap.command_mappings]]

@@ -268,6 +268,26 @@ fn apply_diagnostic_underline<W: Write>(
     }
 }
 
+fn apply_labeled_jump_style<W: Write>(writer: &mut W, bg: Color, fg: Color) -> io::Result<()> {
+    execute!(
+        writer,
+        SetAttribute(Attribute::Reset),
+        SetBackgroundColor(bg),
+        SetForegroundColor(fg),
+        SetAttribute(Attribute::Bold)
+    )
+}
+
+fn restore_after_labeled_jump<W: Write>(writer: &mut W, bg: Color, fg: Color) -> io::Result<()> {
+    execute!(
+        writer,
+        SetAttribute(Attribute::Reset),
+        SetAttribute(Attribute::NoUnderline)
+    )?;
+    write_ansi_underline_color(writer, Color::Reset)?;
+    execute!(writer, SetBackgroundColor(bg), SetForegroundColor(fg))
+}
+
 fn editor_char_display_width(ch: char, tab_width: usize) -> usize {
     if ch == '\t' {
         tab_width.max(1)
@@ -1202,6 +1222,11 @@ impl Terminal {
 
                 // Render segment content with syntax highlighting
                 let segment_text = segment.text.trim_end_matches('\n');
+                let jump_labels = if is_active {
+                    editor.labeled_jump_labels_for_line(file_line)
+                } else {
+                    Vec::new()
+                };
 
                 let rendered_cols = self.render_line_segment_with_highlights(
                     segment_text,
@@ -1213,6 +1238,7 @@ impl Terminal {
                     &editor.mode,
                     highlight_cursor_line && is_cursor_line,
                     &editor.search_matches,
+                    &jump_labels,
                     &line_diagnostics,
                     editor_bg,
                     editor_fg,
@@ -1220,6 +1246,8 @@ impl Terminal {
                     selection_bg,
                     search_bg,
                     search_fg,
+                    theme.ui.finder_match,
+                    Color::Black,
                     theme.diagnostic.error,
                     theme.ui.line_number, // Use grey color for unused code (hint diagnostics)
                     tab_width,
@@ -1538,6 +1566,11 @@ impl Terminal {
                     let selection_bg = theme.ui.selection;
                     let search_bg = theme.ui.search_match_bg;
                     let search_fg = theme.ui.search_match_fg;
+                    let jump_labels = if is_active {
+                        editor.labeled_jump_labels_for_line(file_line)
+                    } else {
+                        Vec::new()
+                    };
 
                     let rendered_cols = self.render_line_with_highlights(
                         &line_str,
@@ -1548,6 +1581,7 @@ impl Terminal {
                         &editor.mode,
                         highlight_cursor_line && is_cursor_line,
                         &editor.search_matches,
+                        &jump_labels,
                         &line_diagnostics,
                         editor_bg,
                         editor_fg,
@@ -1555,6 +1589,8 @@ impl Terminal {
                         selection_bg,
                         search_bg,
                         search_fg,
+                        theme.ui.finder_match,
+                        Color::Black,
                         theme.diagnostic.error,
                         theme.ui.line_number, // Use grey color for unused code (hint diagnostics)
                         tab_width,
@@ -1762,6 +1798,7 @@ impl Terminal {
         mode: &Mode,
         is_cursor_line: bool,
         search_matches: &[(usize, usize, usize)],
+        jump_labels: &[(usize, char)],
         diagnostics: &[&Diagnostic],
         editor_bg: Color,
         editor_fg: Color,
@@ -1769,6 +1806,8 @@ impl Terminal {
         selection_bg: Color,
         search_match_bg: Color,
         search_match_fg: Color,
+        jump_label_bg: Color,
+        jump_label_fg: Color,
         diagnostic_error_color: Color,
         diagnostic_hint_color: Color,
         tab_width: usize,
@@ -1837,6 +1876,24 @@ impl Terminal {
             // Check if in search match
             let is_search = source_col.map_or(false, in_search_match);
 
+            let jump_label = source_col.and_then(|actual_col| {
+                jump_labels
+                    .iter()
+                    .find_map(|(col, label)| (*col == actual_col).then_some(*label))
+            });
+
+            if let Some(label) = jump_label {
+                apply_labeled_jump_style(&mut self.stdout, jump_label_bg, jump_label_fg)?;
+                rendered_cols += print_editor_char(label, tab_width);
+                restore_after_labeled_jump(&mut self.stdout, base_bg, editor_fg)?;
+                current_fg = Some(editor_fg);
+                current_bg = Some(base_bg);
+                current_bold = false;
+                current_italic = false;
+                current_underline_color = None;
+                continue;
+            }
+
             let diag_at_col = source_col
                 .and_then(|actual_col| diagnostic_at_col(diagnostics, line_num, actual_col));
 
@@ -1854,7 +1911,9 @@ impl Terminal {
                 diag_at_col.map_or(false, |d| d.severity == DiagnosticSeverity::Hint);
 
             // Priority: visual selection > search match > hint (grey out) > base
-            let (desired_bg, desired_fg) = if in_visual {
+            let (desired_bg, desired_fg) = if jump_label.is_some() {
+                (jump_label_bg, jump_label_fg)
+            } else if in_visual {
                 (selection_bg, syntax_color.unwrap_or(editor_fg))
             } else if is_search {
                 (search_match_bg, search_match_fg)
@@ -1864,14 +1923,16 @@ impl Terminal {
             } else {
                 (base_bg, syntax_color.unwrap_or(editor_fg))
             };
-            let desired_style = if in_visual || (!is_search && !is_hint_diagnostic) {
-                syntax_style
-            } else {
-                None
-            };
-            let desired_bold = desired_style.map_or(false, |style| style.bold);
+            let desired_style =
+                if jump_label.is_none() && (in_visual || (!is_search && !is_hint_diagnostic)) {
+                    syntax_style
+                } else {
+                    None
+                };
+            let desired_bold =
+                jump_label.is_some() || desired_style.map_or(false, |style| style.bold);
             let desired_italic = desired_style.map_or(false, |style| style.italic);
-            let desired_underline_color = if in_visual || is_search {
+            let desired_underline_color = if jump_label.is_some() || in_visual || is_search {
                 None
             } else {
                 diag_at_col
@@ -1914,7 +1975,7 @@ impl Terminal {
                 current_underline_color = desired_underline_color;
             }
 
-            rendered_cols += print_editor_char(*ch, tab_width);
+            rendered_cols += print_editor_char(jump_label.unwrap_or(*ch), tab_width);
         }
 
         // Restore to base background/foreground and clear text attributes.
@@ -5773,6 +5834,7 @@ impl Terminal {
         mode: &Mode,
         is_cursor_line: bool,
         search_matches: &[(usize, usize, usize)],
+        jump_labels: &[(usize, char)],
         diagnostics: &[&Diagnostic],
         editor_bg: Color,
         editor_fg: Color,
@@ -5780,6 +5842,8 @@ impl Terminal {
         selection_bg: Color,
         search_match_bg: Color,
         search_match_fg: Color,
+        jump_label_bg: Color,
+        jump_label_fg: Color,
         diagnostic_error_color: Color,
         diagnostic_hint_color: Color,
         tab_width: usize,
@@ -5863,6 +5927,22 @@ impl Terminal {
             // Check if in search match
             let is_search_match = in_search_match(actual_col);
 
+            let jump_label = jump_labels
+                .iter()
+                .find_map(|(col, label)| (*col == actual_col).then_some(*label));
+
+            if let Some(label) = jump_label {
+                apply_labeled_jump_style(&mut self.stdout, jump_label_bg, jump_label_fg)?;
+                rendered_cols += print_editor_char(label, tab_width);
+                restore_after_labeled_jump(&mut self.stdout, base_bg, editor_fg)?;
+                current_fg = Some(editor_fg);
+                current_bg = Some(base_bg);
+                current_bold = false;
+                current_italic = false;
+                current_underline_color = None;
+                continue;
+            }
+
             let diag_at_col = diagnostic_at_col(diagnostics, line_idx, actual_col);
 
             // Check if within a hint diagnostic (unused variable/import) - grey out the text
@@ -5870,7 +5950,9 @@ impl Terminal {
                 diag_at_col.map_or(false, |d| d.severity == DiagnosticSeverity::Hint);
 
             // Priority: visual selection > search match > hint (grey out) > base
-            let (desired_bg, desired_fg) = if is_selected {
+            let (desired_bg, desired_fg) = if jump_label.is_some() {
+                (jump_label_bg, jump_label_fg)
+            } else if is_selected {
                 (selection_bg, syntax_color.unwrap_or(editor_fg))
             } else if is_search_match {
                 (search_match_bg, search_match_fg)
@@ -5880,14 +5962,18 @@ impl Terminal {
             } else {
                 (base_bg, syntax_color.unwrap_or(editor_fg))
             };
-            let desired_style = if is_selected || (!is_search_match && !is_hint_diagnostic) {
+            let desired_style = if jump_label.is_none()
+                && (is_selected || (!is_search_match && !is_hint_diagnostic))
+            {
                 syntax_style
             } else {
                 None
             };
-            let desired_bold = desired_style.map_or(false, |style| style.bold);
+            let desired_bold =
+                jump_label.is_some() || desired_style.map_or(false, |style| style.bold);
             let desired_italic = desired_style.map_or(false, |style| style.italic);
-            let desired_underline_color = if is_selected || is_search_match {
+            let desired_underline_color = if jump_label.is_some() || is_selected || is_search_match
+            {
                 None
             } else {
                 diag_at_col
@@ -5930,7 +6016,7 @@ impl Terminal {
                 current_underline_color = desired_underline_color;
             }
 
-            rendered_cols += print_editor_char(*ch, tab_width);
+            rendered_cols += print_editor_char(jump_label.unwrap_or(*ch), tab_width);
         }
 
         // Handle selection extending past line end
@@ -6330,6 +6416,11 @@ pub fn handle_key(editor: &mut Editor, key: KeyEvent) {
         return;
     }
 
+    if editor.labeled_jump.is_some() {
+        handle_labeled_jump_key(editor, key);
+        return;
+    }
+
     // Clear status message on any key (except for pending operations, command mode, search mode)
     if editor.mode != Mode::Command
         && editor.mode != Mode::Search
@@ -6377,6 +6468,34 @@ pub fn handle_key(editor: &mut Editor, key: KeyEvent) {
         Mode::Finder => handle_finder_mode(editor, key),
         Mode::Explorer => handle_explorer_mode(editor, key),
         Mode::RenamePrompt => handle_rename_prompt_mode(editor, key),
+    }
+}
+
+fn handle_labeled_jump_key(editor: &mut Editor, key: KeyEvent) {
+    match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Esc) | (KeyModifiers::CONTROL, KeyCode::Char('[')) => {
+            editor.cancel_labeled_jump();
+        }
+        (KeyModifiers::NONE, KeyCode::Backspace) => {
+            editor.pop_labeled_jump_query_char();
+        }
+        (modifiers, KeyCode::Char(ch))
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT)
+                && !ch.is_control() =>
+        {
+            let query_len = editor
+                .labeled_jump
+                .as_ref()
+                .map(|state| state.query.chars().count())
+                .unwrap_or(0);
+            if query_len >= 2 {
+                editor.select_labeled_jump_label(ch);
+            } else {
+                editor.push_labeled_jump_query_char(ch);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -9879,6 +9998,10 @@ fn execute_command(editor: &mut Editor, cmd: Command) {
             editor.open_flight_recorder_report();
             CommandResult::Ok
         }
+        Command::Jump => {
+            editor.start_labeled_jump();
+            CommandResult::Ok
+        }
         Command::ConfigOpen => match editor.open_user_config_file() {
             Ok(path) => CommandResult::Message(format!("Opened config: {}", path.display())),
             Err(message) => CommandResult::Error(message),
@@ -10001,9 +10124,10 @@ pub fn execute_leader_action(editor: &mut Editor, action: &LeaderAction) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_diagnostic_underline, diagnostic_at_col, diagnostic_underline_color, execute_command,
-        execute_leader_action, finder_preview_match_ranges, handle_insert_mode, handle_key,
-        replace_completion_text, Terminal,
+        apply_diagnostic_underline, apply_labeled_jump_style, diagnostic_at_col,
+        diagnostic_underline_color, execute_command, execute_leader_action,
+        finder_preview_match_ranges, handle_insert_mode, handle_key, replace_completion_text,
+        restore_after_labeled_jump, Terminal,
     };
     use crate::commands::{Command, CommandPopupMode};
     use crate::config::{KeymapEntry, Settings};
@@ -10906,6 +11030,46 @@ mod tests {
     }
 
     #[test]
+    fn labeled_jump_style_resets_existing_text_attributes() {
+        crossterm::style::force_color_output(true);
+        let mut output = Vec::new();
+
+        apply_labeled_jump_style(&mut output, Color::Yellow, Color::Black)
+            .expect("apply jump label style");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(
+            rendered.contains("\x1b[0m"),
+            "jump label style should reset inherited underline and text attributes"
+        );
+    }
+
+    #[test]
+    fn labeled_jump_restore_resets_label_attributes_after_label() {
+        crossterm::style::force_color_output(true);
+        let mut output = Vec::new();
+
+        restore_after_labeled_jump(&mut output, Color::Rgb { r: 1, g: 2, b: 3 }, Color::White)
+            .expect("restore after jump label");
+
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(
+            rendered.starts_with("\x1b[0m"),
+            "restoring after a jump label should reset label-only attributes first"
+        );
+        assert!(
+            rendered.contains("\x1b[24m"),
+            "restoring after a jump label should explicitly clear underline"
+        );
+        assert!(
+            rendered.contains("\x1b[59m"),
+            "restoring after a jump label should reset underline color"
+        );
+        assert!(rendered.contains("\x1b[48;2;1;2;3m"));
+        assert!(rendered.ends_with("\x1b[38;5;15m"));
+    }
+
+    #[test]
     fn markdown_preview_command_opens_only_for_markdown_buffers() {
         let tmp = unique_temp_dir("nevi_markdown_preview_command");
         std::fs::create_dir_all(&tmp).expect("create temp dir");
@@ -10987,6 +11151,58 @@ mod tests {
         assert!(text.contains("show_leader_popup"));
         assert!(text.contains("explorer"));
         assert!(!text.starts_with("```toml"));
+    }
+
+    #[test]
+    fn jump_command_starts_labeled_jump_state() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("alpha old\nbeta old\n");
+
+        execute_command(&mut editor, Command::Jump);
+
+        let state = editor.labeled_jump.as_ref().expect("jump state");
+        assert_eq!(state.query, "");
+        assert!(state.targets.is_empty());
+        assert_eq!(
+            editor.status_message.as_deref(),
+            Some("Jump: type 2 chars, label to jump, Esc cancels")
+        );
+    }
+
+    #[test]
+    fn labeled_jump_jumps_to_selected_visible_match() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("first old\nsecond old\nthird\n");
+        editor.term_height = 8;
+        editor.update_pane_rects();
+
+        execute_command(&mut editor, Command::Jump);
+        handle_key(&mut editor, key('o'));
+        handle_key(&mut editor, key('l'));
+
+        let state = editor.labeled_jump.as_ref().expect("jump state");
+        assert_eq!(state.query, "ol");
+        assert_eq!(state.targets.len(), 2);
+        assert_eq!(state.targets[0].label, 'a');
+        assert_eq!((state.targets[0].line, state.targets[0].col), (0, 6));
+        assert_eq!(state.targets[1].label, 's');
+        assert_eq!((state.targets[1].line, state.targets[1].col), (1, 7));
+
+        handle_key(&mut editor, key('s'));
+
+        assert!(editor.labeled_jump.is_none());
+        assert_eq!((editor.cursor.line, editor.cursor.col), (1, 7));
+    }
+
+    #[test]
+    fn escape_cancels_labeled_jump() {
+        let mut editor = Editor::default();
+
+        execute_command(&mut editor, Command::Jump);
+        handle_key(&mut editor, esc_key());
+
+        assert!(editor.labeled_jump.is_none());
+        assert_eq!(editor.status_message.as_deref(), Some("Jump cancelled"));
     }
 
     #[test]

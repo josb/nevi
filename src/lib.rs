@@ -12,6 +12,7 @@ pub mod harpoon;
 pub mod health;
 pub mod indent;
 pub mod input;
+pub mod labeled_jump;
 pub mod lsp;
 pub mod markdown_preview;
 pub mod perf;

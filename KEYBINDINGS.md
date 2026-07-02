@@ -106,6 +106,26 @@ action = ":Terminals"
 desc = "Terminal picker"
 ```
 
+Labeled jump is mapped to `<Space>j` by default. To move it to `<Space>s`:
+
+```toml
+[[keymap.leader_mappings]]
+key = "s"
+action = ":Jump"
+desc = "Labeled jump"
+```
+
+To use plain `s` for labeled jump instead:
+
+```toml
+[[keymap.normal]]
+from = "s"
+to = ":Jump<CR>"
+```
+
+This overrides Vim's default `s` behavior, which substitutes the character under
+the cursor and enters insert mode.
+
 ### Key Notation
 
 When specifying keys, use these formats:
@@ -677,6 +697,7 @@ the popup, or press `Esc` to cancel.
 | `<leader>fg` | Live grep (search in files) |
 | `<leader>fl` | Find lines in current buffer |
 | `<leader>sw` | Search word under cursor |
+| `<leader>j` | Labeled jump to visible text |
 | `<leader>fb` | Find buffers |
 | `<leader>ft` | Theme picker |
 | `<leader>tt` | Terminal picker |
@@ -886,6 +907,7 @@ While typing an Ex command after `:`.
 | `:LiveGrep` / `:grep` / `:rg` | Search in files |
 | `:BufferSearch` / `:FindLines` / `:Lines` / `:bl` | Find lines in current buffer |
 | `:SearchWord` / `:sw` | Search word under cursor |
+| `:Jump` / `:jump` | Start labeled jump mode: type 2 chars, then press a visible label |
 | `:FindBuffers` / `:fb` / `:buffers` | Open buffer finder |
 | `:FindDiagnostics` / `:diag` / `:fd` | Open diagnostics finder |
 | `:DiagnosticFloat` / `:df` | Show diagnostics for cursor line |

@@ -159,6 +159,8 @@ pub enum Command {
     CheckHealth,
     /// :FlightRecorder - Open recent performance timing report
     FlightRecorder,
+    /// :Jump - Start labeled jump navigation for visible text
+    Jump,
     /// :ConfigOpen - Open the user config file
     ConfigOpen,
     /// :ConfigDefaults - Open the latest default config template
@@ -648,6 +650,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         takes_args: false,
     },
     CommandSpec {
+        command: "Jump",
+        aliases: &["jump"],
+        description: "Jump to visible text with labels",
+        takes_args: false,
+    },
+    CommandSpec {
         command: "ConfigOpen",
         aliases: &["configopen", "config", "ConfigEdit", "configedit"],
         description: "Open user config file",
@@ -1096,6 +1104,7 @@ pub fn parse_command(input: &str) -> Command {
         "FlightRecorder" | "flightrecorder" | "flight" | "WhySlow" | "whyslow" => {
             Command::FlightRecorder
         }
+        "Jump" | "jump" => Command::Jump,
         "ConfigOpen" | "configopen" | "config" | "ConfigEdit" | "configedit" => Command::ConfigOpen,
         "ConfigDefaults" | "configdefaults" | "defaults" => Command::ConfigDefaults,
 
@@ -1986,6 +1995,24 @@ mod tests {
         assert!(
             rows.iter().any(|(name, _)| name == ":FlightRecorder"),
             "expected :FlightRecorder in command cheatsheet rows"
+        );
+    }
+
+    #[test]
+    fn jump_command_is_parseable_and_listed() {
+        assert_eq!(format!("{:?}", parse_command("Jump")), "Jump");
+        assert_eq!(format!("{:?}", parse_command("jump")), "Jump");
+
+        let suggestions = command_suggestions("jump", 8);
+        assert!(
+            suggestions.iter().any(|item| item.command == "Jump"),
+            "expected Jump to match jump query"
+        );
+
+        let rows = command_cheatsheet_rows();
+        assert!(
+            rows.iter().any(|(name, _)| name == ":Jump"),
+            "expected :Jump in command cheatsheet rows"
         );
     }
 
