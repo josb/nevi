@@ -152,9 +152,11 @@ nevi file1.rs file2.rs
 - `:MarkdownPreview` - Open rendered Markdown reader for `.md` files (`j/k`, `Ctrl-d/u`, `g/G`, `q`)
 - `:ProjectReplace/{pattern}/{replacement}/g` - Preview project-wide literal replace
 - `:ProjectReplaceApply` - Apply the last project replace preview
+- `:Jump` - Labeled jump to visible text
 - `<Space>ff` - Find files
 - `<Space>fg` - Live grep
 - `<Space>fl` - Find lines in current buffer
+- `<Space>j` - Labeled jump to visible text
 - `<Space>gc` - Git changes picker
 - `<Space>e` - File explorer
 - `<Space>tt` - Terminal picker
@@ -286,6 +288,7 @@ Press `<Space>` by itself to show available leader continuations. Set `[keymap] 
 | `fg` | Live grep |
 | `fl` | Find lines in current buffer |
 | `sw` | Search word under cursor |
+| `j` | Labeled jump to visible text |
 | `fb` | Find buffers |
 | `ft` | Theme picker |
 | `fk` | Search keymaps |

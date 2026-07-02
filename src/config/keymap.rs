@@ -923,6 +923,7 @@ mod tests {
             ("ff", "FindFiles"),
             ("fg", "LiveGrep"),
             ("sw", "SearchWord"),
+            ("j", "Jump"),
             ("fb", "FindBuffers"),
             ("ft", "Themes"),
             ("tt", "Terminals"),
@@ -1034,6 +1035,19 @@ mod tests {
                 .iter()
                 .any(|m| m.key == "fk" && m.action.contains("Keymaps")),
             "default leader mappings should bind fk -> :Keymaps"
+        );
+    }
+
+    #[test]
+    fn default_leader_includes_labeled_jump() {
+        use super::super::KeymapSettings;
+        let settings = KeymapSettings::default();
+        assert!(
+            settings
+                .leader_mappings
+                .iter()
+                .any(|m| m.key == "j" && m.action.contains("Jump")),
+            "default leader mappings should bind j -> :Jump"
         );
     }
 }
