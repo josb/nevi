@@ -267,6 +267,18 @@ impl<'a> RenderLineContextFactory<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderLineTextScope {
+    WrappedSegment,
+    LogicalLine,
+}
+
+impl RenderLineTextScope {
+    fn extend_visual_selection_past_line_end(self) -> bool {
+        matches!(self, Self::LogicalLine)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RenderTextOptions {
     extend_visual_selection_past_line_end: bool,
@@ -1844,8 +1856,11 @@ impl Terminal {
                     &line_diagnostics,
                 );
 
-                let rendered_cols =
-                    self.render_line_segment_with_highlights(segment_text, &context)?;
+                let rendered_cols = self.render_line_text(
+                    segment_text,
+                    &context,
+                    RenderLineTextScope::WrappedSegment,
+                )?;
 
                 // Fill remaining space (sign column = 2)
                 let mut chars_printed =
@@ -2171,7 +2186,11 @@ impl Terminal {
                         &line_diagnostics,
                     );
 
-                    let rendered_cols = self.render_line_with_highlights(&line_str, &context)?;
+                    let rendered_cols = self.render_line_text(
+                        &line_str,
+                        &context,
+                        RenderLineTextScope::LogicalLine,
+                    )?;
 
                     // Track characters printed for fill calculation (sign column = 2)
                     let mut chars_printed =
@@ -2361,19 +2380,19 @@ impl Terminal {
         Ok(())
     }
 
-    /// Render a line segment with syntax highlighting (for wrapped lines)
-    /// col_offset is the starting column in the original line
-    fn render_line_segment_with_highlights(
+    fn render_line_text(
         &mut self,
         text: &str,
         context: &RenderLineContext<'_>,
+        scope: RenderLineTextScope,
     ) -> anyhow::Result<usize> {
         render_line_text_with_context(
             &mut self.stdout,
             text,
             context,
             RenderTextOptions {
-                extend_visual_selection_past_line_end: false,
+                extend_visual_selection_past_line_end: scope
+                    .extend_visual_selection_past_line_end(),
             },
         )
     }
@@ -6248,23 +6267,6 @@ impl Terminal {
     fn get_preview_highlights(&self, editor: &Editor, line_idx: usize) -> Vec<HighlightSpan> {
         // Use the preview syntax manager from editor if available
         editor.preview_syntax.get_line_highlights(line_idx)
-    }
-
-    /// Render a line with syntax highlighting and optional visual selection
-    /// Now accepts theme colors to maintain proper background
-    fn render_line_with_highlights(
-        &mut self,
-        line: &str,
-        context: &RenderLineContext<'_>,
-    ) -> anyhow::Result<usize> {
-        render_line_text_with_context(
-            &mut self.stdout,
-            line,
-            context,
-            RenderTextOptions {
-                extend_visual_selection_past_line_end: true,
-            },
-        )
     }
 
     /// Get the syntax color at a given column position
@@ -10478,10 +10480,10 @@ pub fn execute_leader_action(editor: &mut Editor, action: &LeaderAction) {
 mod tests {
     use super::{
         PartialRenderKind, RenderLineColors, RenderLineContext, RenderLineContextFactory,
-        RenderTextOptions, Terminal, apply_diagnostic_underline, apply_labeled_jump_style,
-        diagnostic_at_col, diagnostic_underline_color, execute_command, execute_leader_action,
-        finder_preview_match_ranges, handle_insert_mode, handle_key, render_line_text_with_context,
-        replace_completion_text, restore_after_labeled_jump,
+        RenderLineTextScope, RenderTextOptions, Terminal, apply_diagnostic_underline,
+        apply_labeled_jump_style, diagnostic_at_col, diagnostic_underline_color, execute_command,
+        execute_leader_action, finder_preview_match_ranges, handle_insert_mode, handle_key,
+        render_line_text_with_context, replace_completion_text, restore_after_labeled_jump,
     };
     use crate::commands::{Command, CommandPopupMode};
     use crate::config::{KeymapEntry, Settings};
@@ -12271,6 +12273,65 @@ mod tests {
         let rendered = String::from_utf8(output).expect("utf8");
         assert!(rendered.contains("ab"));
         assert!(rendered.contains("\x1b[48;5;4m "));
+    }
+
+    #[test]
+    fn terminal_render_line_text_scope_preserves_wrapped_vs_logical_line_eol_selection() {
+        crossterm::style::force_color_output(true);
+        let diagnostics = Vec::<&Diagnostic>::new();
+        let highlights = Vec::<HighlightSpan>::new();
+        let search_matches = Vec::<(usize, usize, usize)>::new();
+        let jump_labels = Vec::<(usize, char)>::new();
+        let colors = RenderLineColors {
+            editor_bg: Color::Black,
+            editor_fg: Color::White,
+            cursor_line_bg: Color::DarkGrey,
+            selection_bg: Color::DarkBlue,
+            search_match_bg: Color::Yellow,
+            search_match_fg: Color::Black,
+            jump_label_bg: Color::Green,
+            jump_label_fg: Color::Black,
+            diagnostic_error_color: Color::Red,
+            diagnostic_hint_color: Color::DarkGrey,
+        };
+        let context = RenderLineContext {
+            line_idx: 0,
+            col_offset: 0,
+            virtual_prefix_chars: 0,
+            highlights: &highlights,
+            visual_range: Some((0, 0, 0, 2)),
+            mode: &Mode::Visual,
+            is_cursor_line: false,
+            search_matches: &search_matches,
+            jump_labels: &jump_labels,
+            diagnostics: &diagnostics,
+            colors,
+            tab_width: 4,
+        };
+
+        let wrapped_output = SharedOutput::default();
+        let mut wrapped_terminal = Terminal::new_for_test(Box::new(wrapped_output.clone()));
+        let wrapped_cols = wrapped_terminal
+            .render_line_text("ab", &context, RenderLineTextScope::WrappedSegment)
+            .expect("render wrapped segment");
+
+        assert_eq!(wrapped_cols, 2);
+        assert!(
+            !wrapped_output.into_string().contains("\x1b[48;5;4m "),
+            "wrapped segment rendering should not extend visual selection past line end"
+        );
+
+        let logical_output = SharedOutput::default();
+        let mut logical_terminal = Terminal::new_for_test(Box::new(logical_output.clone()));
+        let logical_cols = logical_terminal
+            .render_line_text("ab", &context, RenderLineTextScope::LogicalLine)
+            .expect("render logical line");
+
+        assert_eq!(logical_cols, 3);
+        assert!(
+            logical_output.into_string().contains("\x1b[48;5;4m "),
+            "logical line rendering should extend visual selection past line end"
+        );
     }
 
     #[test]
