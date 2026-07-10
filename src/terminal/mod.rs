@@ -10917,11 +10917,12 @@ mod tests {
     }
 
     #[test]
-    fn full_render_after_file_end_shows_context_above_last_line() {
+    fn full_render_after_wrapped_file_end_shows_context_above_last_line() {
         let mut editor = Editor::default();
-        editor.set_size(80, 12);
-        editor.settings.editor.scroll_off = 5;
-        editor.settings.editor.relative_numbers = true;
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 80;
         let content = (1..=100)
             .map(|line| format!("line {line:03}\n"))
             .collect::<String>();
@@ -10931,7 +10932,7 @@ mod tests {
         let rendered = render_editor_to_string(&editor);
 
         assert!(
-            rendered.contains("line 091"),
+            rendered.contains("line 079"),
             "render should keep visible context above the final line; output={rendered:?}"
         );
         assert!(

@@ -3701,8 +3701,6 @@ impl Editor {
             self.viewport_offset = self.cursor.line + scroll_off + 1 - text_rows;
         }
 
-        self.clamp_viewport_to_content();
-
         if self.settings.editor.wrap {
             self.scroll_wrapped_view_to_cursor(text_rows, scroll_off);
         }
@@ -3761,6 +3759,52 @@ impl Editor {
 
         if self.cursor.line != self.viewport_offset {
             self.h_offset = 0;
+        }
+    }
+
+    fn pack_viewport_at_eof(&mut self) {
+        let text_rows = self.text_rows();
+        let last_line = last_addressable_line(self.buffer());
+
+        if !self.settings.editor.wrap {
+            self.viewport_offset = last_line.saturating_add(1).saturating_sub(text_rows);
+            self.h_offset = 0;
+            return;
+        }
+
+        let wrap_width = self.effective_wrap_width();
+        if text_rows == 0 || wrap_width == 0 {
+            self.viewport_offset = last_line;
+            self.h_offset = 0;
+            return;
+        }
+
+        let tab_width = self.get_effective_tab_width();
+        let mut remaining_rows = text_rows;
+        let mut line_idx = last_line;
+
+        loop {
+            let line = self
+                .buffers
+                .get(self.current_buffer_idx)
+                .and_then(|buffer| buffer.line(line_idx))
+                .map(|line| line.to_string())
+                .unwrap_or_default();
+            let segment_count = Self::display_line_segments(&line, wrap_width, tab_width).len();
+
+            if segment_count >= remaining_rows {
+                self.viewport_offset = line_idx;
+                self.h_offset = segment_count.saturating_sub(remaining_rows);
+                return;
+            }
+
+            remaining_rows = remaining_rows.saturating_sub(segment_count);
+            if line_idx == 0 {
+                self.viewport_offset = 0;
+                self.h_offset = 0;
+                return;
+            }
+            line_idx -= 1;
         }
     }
 
@@ -9553,7 +9597,7 @@ impl Editor {
     /// Scroll viewport so cursor is at center of screen (zz command)
     pub fn scroll_cursor_center(&mut self) {
         let text_rows = self.text_rows();
-        let half = text_rows / 2;
+        let half = text_rows.saturating_sub(1) / 2;
 
         if self.cursor.line >= half {
             self.viewport_offset = self.cursor.line - half;
@@ -9564,14 +9608,6 @@ impl Editor {
         if self.active_pane < self.panes.len() {
             self.panes[self.active_pane].viewport_offset = self.viewport_offset;
         }
-    }
-
-    fn clamp_viewport_to_content(&mut self) {
-        let visible_rows = self.text_rows().max(1);
-        let max_viewport_offset = last_addressable_line(self.buffer())
-            .saturating_add(1)
-            .saturating_sub(visible_rows);
-        self.viewport_offset = self.viewport_offset.min(max_viewport_offset);
     }
 
     /// Scroll viewport so cursor is at top of screen (zt command)
@@ -9631,16 +9667,11 @@ impl Editor {
         match motion {
             Motion::ScreenTop => {
                 // H - move to top of visible screen (+ count lines from top)
-                let text_rows = self.text_rows();
-                let scroll_off = self.settings.editor.scroll_off.min(text_rows / 2);
-                let count_offset = count.saturating_sub(1);
-                let target_offset = if self.viewport_offset == 0 {
-                    count_offset
-                } else {
-                    count_offset.max(scroll_off)
-                };
-                let target_line = (self.viewport_offset + target_offset)
-                    .min(last_addressable_line(self.buffer()));
+                let (safe_top, safe_bottom) = self.screen_motion_safe_line_range();
+                let target_line = self
+                    .viewport_offset
+                    .saturating_add(count.saturating_sub(1))
+                    .clamp(safe_top, safe_bottom);
                 self.cursor.line = target_line;
                 // Move to first non-blank
                 self.cursor.col = self.find_first_non_blank(self.cursor.line);
@@ -9662,9 +9693,12 @@ impl Editor {
             Motion::ScreenBottom => {
                 // L - move to bottom of visible screen (- count lines from bottom)
                 let text_rows = self.text_rows();
-                let bottom_screen_line = self.viewport_offset + text_rows.saturating_sub(1);
-                let target_line = bottom_screen_line.saturating_sub(count.saturating_sub(1));
-                let target_line = target_line.min(last_addressable_line(self.buffer()));
+                let (safe_top, safe_bottom) = self.screen_motion_safe_line_range();
+                let target_line = self
+                    .viewport_offset
+                    .saturating_add(text_rows.saturating_sub(1))
+                    .saturating_sub(count.saturating_sub(1))
+                    .clamp(safe_top, safe_bottom);
                 self.cursor.line = target_line;
                 // Move to first non-blank
                 self.cursor.col = self.find_first_non_blank(self.cursor.line);
@@ -9700,8 +9734,42 @@ impl Editor {
                     self.cursor.col = new_col;
                     self.clamp_cursor();
                     self.scroll_to_cursor();
+                    if matches!(motion, Motion::FileEnd) {
+                        self.pack_viewport_at_eof();
+                        if self.active_pane < self.panes.len() {
+                            self.panes[self.active_pane].viewport_offset = self.viewport_offset;
+                            self.panes[self.active_pane].h_offset = self.h_offset;
+                            self.panes[self.active_pane].cursor = self.cursor;
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    fn screen_motion_safe_line_range(&self) -> (usize, usize) {
+        let text_rows = self.text_rows();
+        let scroll_off = self.settings.editor.scroll_off.min(text_rows / 2);
+        let last_line = last_addressable_line(self.buffer());
+        let viewport_top = self.viewport_offset.min(last_line);
+        let viewport_bottom = viewport_top
+            .saturating_add(text_rows.saturating_sub(1))
+            .min(last_line);
+        let safe_top = if viewport_top == 0 {
+            viewport_top
+        } else {
+            viewport_top.saturating_add(scroll_off).min(viewport_bottom)
+        };
+        let safe_bottom = if viewport_bottom == last_line {
+            viewport_bottom
+        } else {
+            viewport_bottom.saturating_sub(scroll_off).max(viewport_top)
+        };
+
+        if safe_top > safe_bottom {
+            (safe_top, safe_top)
+        } else {
+            (safe_top, safe_bottom)
         }
     }
 
@@ -11749,17 +11817,22 @@ mod tests {
     }
 
     #[test]
-    fn scroll_to_cursor_clamps_viewport_at_last_content_line() {
+    fn right_after_zt_near_eof_preserves_neovim_top_line() {
         let mut editor = Editor::default();
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
         let content = (1..=30)
             .map(|line| format!("line {line:02}\n"))
             .collect::<String>();
         editor.replace_buffer_content(&content);
 
-        editor.apply_motion(Motion::FileEnd, 1);
+        editor.apply_motion(Motion::GotoLine(29), 1);
+        editor.scroll_cursor_top();
+        editor.apply_motion(Motion::Right, 1);
 
-        assert_eq!(editor.cursor.line, 29);
-        assert_eq!(editor.viewport_offset, 8);
+        assert_eq!((editor.cursor.line, editor.cursor.col), (28, 1));
+        assert_eq!(editor.viewport_offset, 20);
+        assert_eq!(editor.panes[editor.active_pane].viewport_offset, 20);
     }
 
     #[test]
@@ -11778,11 +11851,12 @@ mod tests {
     }
 
     #[test]
-    fn file_end_keeps_last_line_at_bottom_with_user_like_scrolloff() {
+    fn wrapped_file_end_packs_viewport_against_eof() {
         let mut editor = Editor::default();
-        editor.set_size(80, 12);
-        editor.settings.editor.scroll_off = 5;
-        editor.settings.editor.relative_numbers = true;
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 80;
         let content = (1..=100)
             .map(|line| format!("line {line:03}\n"))
             .collect::<String>();
@@ -11792,13 +11866,14 @@ mod tests {
 
         assert_eq!(editor.cursor.line, 99);
         assert_eq!(
-            editor.viewport_offset, 90,
-            "G should not leave the final content line pinned to the top of the viewport"
+            editor.viewport_offset, 78,
+            "G should fill the viewport from EOF instead of pinning the final line to the top"
         );
         assert_eq!(
-            editor.panes[editor.active_pane].viewport_offset, 90,
+            editor.panes[editor.active_pane].viewport_offset, 78,
             "rendered pane viewport should stay in sync with editor viewport"
         );
+        assert_eq!(editor.panes[editor.active_pane].h_offset, 0);
     }
 
     #[test]
