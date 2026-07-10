@@ -292,6 +292,11 @@ const MOTION_CASES: &[OracleCase] = &[
         keys: "G",
     },
     OracleCase {
+        name: "counted file bottom",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "999G",
+    },
+    OracleCase {
         name: "counted down",
         initial_text: "alpha\nbeta\ngamma\ndelta\n",
         keys: "3j",

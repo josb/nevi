@@ -3574,6 +3574,15 @@ impl Editor {
         self.term_height.saturating_sub(2) as usize // 1 for status, 1 for command line
     }
 
+    fn active_pane_text_rows(&self) -> usize {
+        self.panes
+            .get(self.active_pane)
+            .map(|pane| pane.rect.height as usize)
+            .filter(|height| *height > 0)
+            .unwrap_or_else(|| self.text_rows())
+            .max(1)
+    }
+
     /// Update pane rects based on current layout
     pub fn update_pane_rects(&mut self) {
         let text_height = self.text_rows() as u16;
@@ -3688,7 +3697,7 @@ impl Editor {
 
     /// Ensure cursor is visible by adjusting viewport
     pub fn scroll_to_cursor(&mut self) {
-        let text_rows = self.text_rows();
+        let text_rows = self.active_pane_text_rows();
         let scroll_off = self.settings.editor.scroll_off.min(text_rows / 2);
 
         // Scroll up if cursor is above viewport (with scroll_off margin)
@@ -3763,7 +3772,7 @@ impl Editor {
     }
 
     fn pack_viewport_at_eof(&mut self) {
-        let text_rows = self.text_rows();
+        let text_rows = self.active_pane_text_rows();
         let last_line = last_addressable_line(self.buffer());
 
         if !self.settings.editor.wrap {
@@ -9685,7 +9694,7 @@ impl Editor {
 
     /// Scroll viewport so cursor is at center of screen (zz command)
     pub fn scroll_cursor_center(&mut self) {
-        let text_rows = self.text_rows();
+        let text_rows = self.active_pane_text_rows();
         let half = text_rows.saturating_sub(1) / 2;
 
         if self.cursor.line >= half {
@@ -9710,7 +9719,7 @@ impl Editor {
 
     /// Scroll viewport so cursor is at bottom of screen (zb command)
     pub fn scroll_cursor_bottom(&mut self) {
-        let text_rows = self.text_rows();
+        let text_rows = self.active_pane_text_rows();
         if self.cursor.line >= text_rows.saturating_sub(1) {
             self.viewport_offset = self.cursor.line - text_rows + 1;
         } else {
@@ -9769,7 +9778,7 @@ impl Editor {
             }
             Motion::ScreenMiddle => {
                 // M - move to middle of visible screen
-                let text_rows = self.text_rows();
+                let text_rows = self.active_pane_text_rows();
                 let middle = text_rows.saturating_sub(1) / 2;
                 let target_line =
                     (self.viewport_offset + middle).min(last_addressable_line(self.buffer()));
@@ -9781,7 +9790,7 @@ impl Editor {
             }
             Motion::ScreenBottom => {
                 // L - move to bottom of visible screen (- count lines from bottom)
-                let text_rows = self.text_rows();
+                let text_rows = self.active_pane_text_rows();
                 let (safe_top, safe_bottom) = self.screen_motion_safe_line_range();
                 let target_line = self
                     .viewport_offset
@@ -9817,12 +9826,15 @@ impl Editor {
                     self.cursor.line,
                     self.cursor.col,
                     count,
-                    self.text_rows(),
+                    self.active_pane_text_rows(),
                 ) {
                     self.cursor.line = new_line;
                     self.cursor.col = new_col;
                     self.clamp_cursor();
-                    if matches!(motion, Motion::FileEnd) {
+                    let reaches_eof = matches!(motion, Motion::FileEnd)
+                        || matches!(motion, Motion::GotoLine(_))
+                            && self.cursor.line == last_addressable_line(self.buffer());
+                    if reaches_eof {
                         self.pack_viewport_at_eof();
                         if self.active_pane < self.panes.len() {
                             self.panes[self.active_pane].viewport_offset = self.viewport_offset;
@@ -9838,7 +9850,7 @@ impl Editor {
     }
 
     fn screen_motion_safe_line_range(&self) -> (usize, usize) {
-        let text_rows = self.text_rows();
+        let text_rows = self.active_pane_text_rows();
         let scroll_off = self.settings.editor.scroll_off.min(text_rows / 2);
         let last_line = last_addressable_line(self.buffer());
         let viewport_top = self.viewport_offset.min(last_line);
@@ -9872,7 +9884,7 @@ impl Editor {
                 self.cursor.line,
                 self.cursor.col,
                 count,
-                self.text_rows(),
+                self.active_pane_text_rows(),
             ) {
                 self.cursor.line = new_line;
                 self.cursor.col = new_col;
@@ -11982,6 +11994,99 @@ mod tests {
         assert_eq!(editor.h_offset, 0);
         assert_eq!(editor.panes[editor.active_pane].viewport_offset, 1);
         assert_eq!(editor.panes[editor.active_pane].h_offset, 0);
+        assert_eq!(editor.panes[editor.active_pane].cursor, editor.cursor);
+    }
+
+    #[test]
+    fn file_end_packs_horizontal_split_to_active_pane_height() {
+        let mut editor = Editor::default();
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        let content = (1..=100)
+            .map(|line| format!("line {line:03}\n"))
+            .collect::<String>();
+        editor.replace_buffer_content(&content);
+        editor.hsplit(None).expect("horizontal split");
+
+        editor.apply_motion(Motion::FileEnd, 1);
+
+        assert_eq!(editor.panes[editor.active_pane].rect.height, 11);
+        assert_eq!((editor.cursor.line, editor.cursor.col), (99, 0));
+        assert_eq!(editor.viewport_offset, 89);
+        assert_eq!(editor.panes[editor.active_pane].viewport_offset, 89);
+        assert_eq!(editor.panes[editor.active_pane].cursor, editor.cursor);
+    }
+
+    #[test]
+    fn wrapped_file_end_packs_horizontal_split_and_syncs_active_pane() {
+        let mut editor = Editor::default();
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 80;
+        let content = (1..=100)
+            .map(|line| format!("line {line:03}\n"))
+            .collect::<String>();
+        editor.replace_buffer_content(&content);
+        editor.hsplit(None).expect("horizontal split");
+
+        editor.apply_motion(Motion::FileEnd, 1);
+
+        assert_eq!(editor.panes[editor.active_pane].rect.height, 11);
+        assert_eq!((editor.cursor.line, editor.cursor.col), (99, 0));
+        assert_eq!(editor.viewport_offset, 89);
+        assert_eq!(editor.h_offset, 0);
+        assert_eq!(editor.panes[editor.active_pane].viewport_offset, 89);
+        assert_eq!(editor.panes[editor.active_pane].h_offset, 0);
+        assert_eq!(editor.panes[editor.active_pane].cursor, editor.cursor);
+    }
+
+    #[test]
+    fn screen_position_motions_use_horizontal_split_height() {
+        for motion in [
+            Motion::ScreenTop,
+            Motion::ScreenMiddle,
+            Motion::ScreenBottom,
+        ] {
+            let mut editor = Editor::default();
+            editor.set_size(80, 24);
+            editor.settings.editor.scroll_off = 8;
+            let content = (1..=100)
+                .map(|line| format!("line {line:03}\n"))
+                .collect::<String>();
+            editor.replace_buffer_content(&content);
+            editor.hsplit(None).expect("horizontal split");
+            editor.cursor.line = 49;
+            editor.scroll_cursor_center();
+
+            editor.apply_motion(motion, 1);
+
+            assert_eq!(editor.panes[editor.active_pane].rect.height, 11);
+            assert_eq!(editor.cursor.line, 49, "motion={motion:?}");
+            assert_eq!(editor.viewport_offset, 44, "motion={motion:?}");
+            assert_eq!(
+                editor.panes[editor.active_pane].viewport_offset, 44,
+                "motion={motion:?}"
+            );
+            assert_eq!(editor.panes[editor.active_pane].cursor, editor.cursor);
+        }
+    }
+
+    #[test]
+    fn counted_g_beyond_eof_packs_last_real_line() {
+        let mut editor = Editor::default();
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        let content = (1..=30)
+            .map(|line| format!("line {line:02}\n"))
+            .collect::<String>();
+        editor.replace_buffer_content(&content);
+
+        editor.apply_motion(Motion::GotoLine(999), 1);
+
+        assert_eq!((editor.cursor.line, editor.cursor.col), (29, 0));
+        assert_eq!(editor.viewport_offset, 8);
+        assert_eq!(editor.panes[editor.active_pane].viewport_offset, 8);
         assert_eq!(editor.panes[editor.active_pane].cursor, editor.cursor);
     }
 

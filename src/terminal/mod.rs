@@ -10960,6 +10960,32 @@ mod tests {
     }
 
     #[test]
+    fn full_render_after_wrapped_file_end_in_horizontal_split_shows_final_context() {
+        let mut editor = Editor::default();
+        editor.set_size(80, 24);
+        editor.settings.editor.scroll_off = 8;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 80;
+        let content = (1..=100)
+            .map(|line| format!("line {line:03}\n"))
+            .collect::<String>();
+        editor.replace_buffer_content(&content);
+        editor.hsplit(None).expect("horizontal split");
+        editor.apply_motion(Motion::FileEnd, 1);
+
+        let rendered = render_editor_to_string(&editor);
+
+        assert!(
+            rendered.contains("line 090"),
+            "active split should show context above EOF; output={rendered:?}"
+        );
+        assert!(
+            rendered.contains("line 100"),
+            "active split should show the final cursor line; output={rendered:?}"
+        );
+    }
+
+    #[test]
     #[ignore = "CI render frame-budget guard; run explicitly with cargo test render_frame_budget -- --ignored --nocapture"]
     fn render_frame_budget_large_multiline_file_stays_bounded() {
         let mut editor = Editor::default();
