@@ -9822,7 +9822,6 @@ impl Editor {
                     self.cursor.line = new_line;
                     self.cursor.col = new_col;
                     self.clamp_cursor();
-                    self.scroll_to_cursor();
                     if matches!(motion, Motion::FileEnd) {
                         self.pack_viewport_at_eof();
                         if self.active_pane < self.panes.len() {
@@ -9830,6 +9829,8 @@ impl Editor {
                             self.panes[self.active_pane].h_offset = self.h_offset;
                             self.panes[self.active_pane].cursor = self.cursor;
                         }
+                    } else {
+                        self.scroll_to_cursor();
                     }
                 }
             }
