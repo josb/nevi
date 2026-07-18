@@ -104,6 +104,33 @@ enum HoverLineType {
     Separator,
 }
 
+fn completion_kind_color(kind: CompletionKind, theme: &crate::theme::Theme) -> Color {
+    match kind {
+        CompletionKind::Text => theme.ui.foreground,
+        CompletionKind::Method => theme.syntax.method.fg,
+        CompletionKind::Function => theme.syntax.function.fg,
+        CompletionKind::Constructor => theme.syntax.constructor.fg,
+        CompletionKind::Field | CompletionKind::Property => theme.syntax.property.fg,
+        CompletionKind::Variable | CompletionKind::Reference => theme.syntax.variable.fg,
+        CompletionKind::Class
+        | CompletionKind::Interface
+        | CompletionKind::Unit
+        | CompletionKind::Enum
+        | CompletionKind::Struct
+        | CompletionKind::TypeParameter => theme.syntax.type_.fg,
+        CompletionKind::Module => theme.syntax.namespace.fg,
+        CompletionKind::Value
+        | CompletionKind::Color
+        | CompletionKind::EnumMember
+        | CompletionKind::Constant => theme.syntax.constant.fg,
+        CompletionKind::Keyword => theme.syntax.keyword.fg,
+        CompletionKind::Snippet => theme.syntax.embedded.fg,
+        CompletionKind::File | CompletionKind::Folder => theme.syntax.string.fg,
+        CompletionKind::Event => theme.syntax.label.fg,
+        CompletionKind::Operator => theme.syntax.operator.fg,
+    }
+}
+
 /// A wrapped segment of a line
 #[derive(Debug, Clone)]
 struct WrapSegment {
@@ -3400,6 +3427,7 @@ impl Terminal {
     /// Render the completion popup with documentation
     fn render_completion(&mut self, editor: &Editor) -> anyhow::Result<()> {
         let completion = &editor.completion;
+        let theme = editor.theme();
         // Use filtered list instead of raw items
         if completion.filtered.is_empty() {
             return Ok(());
@@ -3463,32 +3491,13 @@ impl Terminal {
         };
         let popup_x = popup_screen_col.min(editor.term_width.saturating_sub(popup_width + 2));
 
-        // Colors (Zed-inspired dark theme)
-        let border_color = Color::Rgb {
-            r: 55,
-            g: 55,
-            b: 65,
-        };
-        let bg_color = Color::Rgb {
-            r: 30,
-            g: 30,
-            b: 36,
-        };
-        let selected_bg = Color::Rgb {
-            r: 55,
-            g: 65,
-            b: 95,
-        };
-        let detail_color = Color::Rgb {
-            r: 100,
-            g: 100,
-            b: 115,
-        };
-        let doc_bg = Color::Rgb {
-            r: 35,
-            g: 35,
-            b: 42,
-        };
+        let border_color = theme.ui.completion_border;
+        let bg_color = theme.ui.completion_bg;
+        let selected_bg = theme.ui.completion_selected;
+        let detail_color = theme.ui.completion_detail;
+        let text_color = theme.ui.foreground;
+        let doc_bg = theme.ui.completion_bg;
+        let signature_color = theme.syntax.function.fg;
 
         // Draw top border (rounded corners for Zed-style)
         execute!(self.stdout, cursor::MoveTo(popup_x, popup_y))?;
@@ -3537,22 +3546,11 @@ impl Terminal {
             execute!(self.stdout, SetBackgroundColor(item_bg))?;
 
             // Kind indicator (colored per-kind)
-            let (r, g, b) = item.kind.color();
-            let kind_color = Color::Rgb { r, g, b };
+            let kind_color = completion_kind_color(item.kind, theme);
             execute!(self.stdout, SetForegroundColor(kind_color))?;
             terminal_print!(self, " {} ", item.kind.short_name());
 
-            // Label (brighter when selected)
-            let label_color = if is_selected {
-                Color::White
-            } else {
-                Color::Rgb {
-                    r: 220,
-                    g: 220,
-                    b: 225,
-                }
-            };
-            execute!(self.stdout, SetForegroundColor(label_color))?;
+            execute!(self.stdout, SetForegroundColor(text_color))?;
             let available_label_width = (popup_width as usize).saturating_sub(detail_col_width + 7);
             let label = if item.label.len() > available_label_width {
                 format!(
@@ -3627,12 +3625,12 @@ impl Terminal {
                                 current_line.push(' ');
                                 current_line.push_str(word);
                             } else {
-                                doc_lines.push((current_line, Color::Cyan));
+                                doc_lines.push((current_line, signature_color));
                                 current_line = word.to_string();
                             }
                         }
                         if !current_line.is_empty() {
-                            doc_lines.push((current_line, Color::Cyan));
+                            doc_lines.push((current_line, signature_color));
                         }
                     }
 
@@ -3655,14 +3653,7 @@ impl Terminal {
                             }
                             // Wrap long lines
                             if line.len() <= content_width {
-                                doc_lines.push((
-                                    line.to_string(),
-                                    Color::Rgb {
-                                        r: 180,
-                                        g: 180,
-                                        b: 180,
-                                    },
-                                ));
+                                doc_lines.push((line.to_string(), text_color));
                             } else {
                                 // Simple word wrap
                                 let words: Vec<&str> = line.split_whitespace().collect();
@@ -3674,26 +3665,12 @@ impl Terminal {
                                         current_line.push(' ');
                                         current_line.push_str(word);
                                     } else {
-                                        doc_lines.push((
-                                            current_line,
-                                            Color::Rgb {
-                                                r: 180,
-                                                g: 180,
-                                                b: 180,
-                                            },
-                                        ));
+                                        doc_lines.push((current_line, text_color));
                                         current_line = word.to_string();
                                     }
                                 }
                                 if !current_line.is_empty() {
-                                    doc_lines.push((
-                                        current_line,
-                                        Color::Rgb {
-                                            r: 180,
-                                            g: 180,
-                                            b: 180,
-                                        },
-                                    ));
+                                    doc_lines.push((current_line, text_color));
                                 }
                             }
                         }
@@ -3704,7 +3681,7 @@ impl Terminal {
                         let sig_line_count = if item.detail.is_some() {
                             doc_lines
                                 .iter()
-                                .take_while(|(_, c)| *c == Color::Cyan)
+                                .take_while(|(_, color)| *color == signature_color)
                                 .count()
                         } else {
                             0
@@ -10749,7 +10726,7 @@ mod tests {
     use crate::lsp::types::{CompletionItem, CompletionKind, Diagnostic, DiagnosticSeverity};
     use crate::syntax::{HighlightSpan, SyntaxStyle};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use crossterm::style::{Color, SetBackgroundColor};
+    use crossterm::style::{Color, SetBackgroundColor, SetForegroundColor};
     use std::cell::RefCell;
     use std::fmt::Write as FmtWrite;
     use std::io::{self, Write};
@@ -10834,6 +10811,16 @@ mod tests {
         output.into_string()
     }
 
+    fn render_completion_to_string(editor: &Editor) -> String {
+        crossterm::style::force_color_output(true);
+        let output = SharedOutput::default();
+        let mut terminal = Terminal::new_for_test(Box::new(output.clone()));
+        terminal
+            .render_completion(editor)
+            .expect("completion render should succeed");
+        output.into_string()
+    }
+
     fn measure_render(editor: &Editor) -> Duration {
         crossterm::style::force_color_output(true);
         let output = SharedOutput::default();
@@ -10903,6 +10890,86 @@ mod tests {
         let mut output = Vec::new();
         crossterm::execute!(output, SetBackgroundColor(color)).expect("write ansi background");
         String::from_utf8(output).expect("ansi background should be utf-8")
+    }
+
+    fn foreground_sequence(color: Color) -> String {
+        let mut output = Vec::new();
+        crossterm::execute!(output, SetForegroundColor(color)).expect("write ansi foreground");
+        String::from_utf8(output).expect("ansi foreground should be utf-8")
+    }
+
+    #[test]
+    fn completion_render_uses_active_theme_colors() {
+        let mut editor = Editor::default();
+        editor.set_size(160, 30);
+        editor.replace_buffer_content("dem\n");
+        editor.mode = Mode::Insert;
+        editor.cursor.col = 3;
+        assert!(editor.set_theme("github-light"));
+        editor.show_completions(
+            vec![CompletionItem {
+                item_id: 1,
+                label: "demo".to_string(),
+                kind: CompletionKind::Function,
+                detail: Some("fn demo(value: ExampleType)".to_string()),
+                documentation: Some("Returns an example value.".to_string()),
+                insert_text: None,
+                filter_text: None,
+                sort_text: Some("01".to_string()),
+                text_edit: None,
+                additional_text_edits: Vec::new(),
+                raw_data: None,
+            }],
+            0,
+            0,
+            false,
+        );
+
+        let light_theme = editor.theme().clone();
+        let light_render = render_completion_to_string(&editor);
+        for sequence in [
+            background_sequence(light_theme.ui.completion_bg),
+            background_sequence(light_theme.ui.completion_selected),
+            foreground_sequence(light_theme.ui.completion_border),
+            foreground_sequence(light_theme.ui.completion_detail),
+            foreground_sequence(light_theme.ui.foreground),
+            foreground_sequence(light_theme.syntax.function.fg),
+        ] {
+            assert!(
+                light_render.contains(&sequence),
+                "completion render is missing theme sequence {sequence:?}"
+            );
+        }
+        for old_sequence in [
+            background_sequence(Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 36,
+            }),
+            background_sequence(Color::Rgb {
+                r: 35,
+                g: 35,
+                b: 42,
+            }),
+            foreground_sequence(Color::Rgb {
+                r: 220,
+                g: 220,
+                b: 225,
+            }),
+            foreground_sequence(Color::Cyan),
+        ] {
+            assert!(
+                !light_render.contains(&old_sequence),
+                "completion render leaked old palette sequence {old_sequence:?}"
+            );
+        }
+
+        assert!(editor.set_theme("onedark"));
+        let dark_theme = editor.theme().clone();
+        let dark_render = render_completion_to_string(&editor);
+        assert!(dark_render.contains(&background_sequence(dark_theme.ui.completion_bg)));
+        assert_ne!(light_theme.ui.completion_bg, dark_theme.ui.completion_bg);
+        assert_ne!(light_render, dark_render);
     }
 
     #[test]
