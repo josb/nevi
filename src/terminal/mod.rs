@@ -4371,17 +4371,18 @@ impl Terminal {
         if diagnostics.is_empty() {
             return Ok(());
         }
+        let theme = editor.theme();
 
         // Prepare diagnostic lines with numbers
         let mut lines: Vec<(Color, String)> = Vec::new();
-        lines.push((Color::White, "Diagnostics:".to_string()));
+        lines.push((theme.ui.foreground, "Diagnostics:".to_string()));
 
         for (idx, diag) in diagnostics.iter().enumerate() {
             let (color, prefix) = match diag.severity {
-                DiagnosticSeverity::Error => (Color::Red, ""),
-                DiagnosticSeverity::Warning => (Color::Yellow, ""),
-                DiagnosticSeverity::Information => (Color::Blue, ""),
-                DiagnosticSeverity::Hint => (Color::Cyan, ""),
+                DiagnosticSeverity::Error => (theme.diagnostic.error, ""),
+                DiagnosticSeverity::Warning => (theme.diagnostic.warning, ""),
+                DiagnosticSeverity::Information => (theme.diagnostic.info, ""),
+                DiagnosticSeverity::Hint => (theme.diagnostic.hint, ""),
             };
 
             // Split message into lines and indent continuation lines
@@ -4408,22 +4409,9 @@ impl Terminal {
         // Position at the active pane's text area, below the cursor line.
         let (popup_x, popup_y) = Self::diagnostic_float_position(editor, popup_width, popup_height);
 
-        // Colors
-        let border_color = Color::Rgb {
-            r: 100,
-            g: 100,
-            b: 140,
-        };
-        let bg_color = Color::Rgb {
-            r: 30,
-            g: 30,
-            b: 45,
-        };
-        let title_color = Color::Rgb {
-            r: 180,
-            g: 180,
-            b: 200,
-        };
+        let border_color = theme.ui.popup_border;
+        let bg_color = theme.ui.popup_bg;
+        let title_color = theme.ui.foreground;
 
         // Draw top border with title
         execute!(self.stdout, cursor::MoveTo(popup_x, popup_y))?;
@@ -5515,7 +5503,8 @@ impl Terminal {
         queue!(
             self.stdout,
             cursor::MoveTo(win.x, win.y),
-            SetForegroundColor(border_color)
+            SetForegroundColor(border_color),
+            SetBackgroundColor(finder_bg)
         )?;
         write!(self.stdout, "\u{250c}")?; // ┌
         let title = match editor.finder.mode {
@@ -10799,6 +10788,28 @@ mod tests {
         output.into_string()
     }
 
+    fn render_diagnostic_float_to_string(editor: &Editor) -> String {
+        crossterm::style::force_color_output(true);
+        let output = SharedOutput::default();
+        let mut terminal = Terminal::new_for_test(Box::new(output.clone()));
+        terminal
+            .render_diagnostic_float(editor)
+            .expect("diagnostic float render should succeed");
+        output.into_string()
+    }
+
+    fn render_finder_to_string(editor: &Editor, inherited_background: Color) -> String {
+        crossterm::style::force_color_output(true);
+        let output = SharedOutput::default();
+        let mut terminal = Terminal::new_for_test(Box::new(output.clone()));
+        crossterm::execute!(terminal.stdout, SetBackgroundColor(inherited_background))
+            .expect("seed inherited terminal background");
+        terminal
+            .render_finder(editor)
+            .expect("finder render should succeed");
+        output.into_string()
+    }
+
     fn measure_render(editor: &Editor) -> Duration {
         crossterm::style::force_color_output(true);
         let output = SharedOutput::default();
@@ -10874,6 +10885,13 @@ mod tests {
         let mut output = Vec::new();
         crossterm::execute!(output, SetForegroundColor(color)).expect("write ansi foreground");
         String::from_utf8(output).expect("ansi foreground should be utf-8")
+    }
+
+    fn cursor_position_sequence(x: u16, y: u16) -> String {
+        let mut output = Vec::new();
+        crossterm::execute!(output, crossterm::cursor::MoveTo(x, y))
+            .expect("write cursor position");
+        String::from_utf8(output).expect("ansi cursor position should be utf-8")
     }
 
     #[test]
@@ -11029,6 +11047,115 @@ mod tests {
         assert!(dark_render.contains(&background_sequence(dark_theme.ui.popup_bg)));
         assert_ne!(light_theme.ui.popup_bg, dark_theme.ui.popup_bg);
         assert_ne!(light_render, dark_render);
+    }
+
+    #[test]
+    fn diagnostic_float_render_uses_active_theme_colors() {
+        let root = unique_temp_dir("nevi_diagnostic_float_theme");
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("diagnostic.rs");
+        std::fs::write(&path, "demo\n").expect("write diagnostic fixture");
+
+        let mut editor = Editor::default();
+        editor.set_size(120, 30);
+        editor
+            .open_file(path.clone())
+            .expect("open diagnostic fixture");
+        editor.set_diagnostics(
+            crate::lsp::path_to_uri(&path),
+            vec![
+                diagnostic(0, 0, 4, DiagnosticSeverity::Error),
+                diagnostic(0, 0, 4, DiagnosticSeverity::Warning),
+                diagnostic(0, 0, 4, DiagnosticSeverity::Information),
+                diagnostic(0, 0, 4, DiagnosticSeverity::Hint),
+            ],
+        );
+        editor.show_diagnostic_float = true;
+        assert!(editor.set_theme("github-light"));
+
+        let light_theme = editor.theme().clone();
+        let light_render = render_diagnostic_float_to_string(&editor);
+        for sequence in [
+            background_sequence(light_theme.ui.popup_bg),
+            foreground_sequence(light_theme.ui.popup_border),
+            foreground_sequence(light_theme.ui.foreground),
+            foreground_sequence(light_theme.diagnostic.error),
+            foreground_sequence(light_theme.diagnostic.warning),
+            foreground_sequence(light_theme.diagnostic.info),
+            foreground_sequence(light_theme.diagnostic.hint),
+        ] {
+            assert!(
+                light_render.contains(&sequence),
+                "diagnostic float render is missing theme sequence {sequence:?}"
+            );
+        }
+        for old_sequence in [
+            background_sequence(Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 45,
+            }),
+            foreground_sequence(Color::Rgb {
+                r: 100,
+                g: 100,
+                b: 140,
+            }),
+            foreground_sequence(Color::Rgb {
+                r: 180,
+                g: 180,
+                b: 200,
+            }),
+        ] {
+            assert!(
+                !light_render.contains(&old_sequence),
+                "diagnostic float render leaked old palette sequence {old_sequence:?}"
+            );
+        }
+
+        assert!(editor.set_theme("onedark"));
+        let dark_theme = editor.theme().clone();
+        let dark_render = render_diagnostic_float_to_string(&editor);
+        assert!(dark_render.contains(&background_sequence(dark_theme.ui.popup_bg)));
+        assert_ne!(light_theme.ui.popup_bg, dark_theme.ui.popup_bg);
+        assert_ne!(light_render, dark_render);
+
+        std::fs::remove_dir_all(root).expect("remove temp dir");
+    }
+
+    #[test]
+    fn finder_first_frame_sets_active_theme_background_before_top_border() {
+        let mut editor = Editor::default();
+        editor.set_size(120, 30);
+        editor
+            .finder
+            .open_harpoon(vec![PathBuf::from("manual-theme-test.rs")]);
+        editor.finder.preview_enabled = true;
+        editor.mode = Mode::Finder;
+
+        for (theme_name, inherited_background) in
+            [("github-light", Color::Black), ("onedark", Color::White)]
+        {
+            assert!(editor.set_theme(theme_name));
+            let theme = editor.theme().clone();
+            let win = crate::finder::FloatingWindow::centered_with_preview(
+                editor.term_width,
+                editor.term_height,
+                true,
+            );
+            let rendered = render_finder_to_string(&editor, inherited_background);
+            let expected_top_border = format!(
+                "{}{}{}┌",
+                cursor_position_sequence(win.x, win.y),
+                foreground_sequence(theme.ui.finder_border),
+                background_sequence(theme.ui.finder_bg),
+            );
+            let rendered_prefix: String = rendered.chars().take(80).collect();
+
+            assert!(
+                rendered.contains(&expected_top_border),
+                "finder top border should establish {theme_name} background on its first frame; expected={expected_top_border:?}, actual prefix={rendered_prefix:?}"
+            );
+        }
     }
 
     #[test]
