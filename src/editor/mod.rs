@@ -3486,6 +3486,21 @@ impl Editor {
     }
 
     /// Save current pane state before switching
+    /// Copy the view state the renderer reads from the active pane (cursor,
+    /// viewport, horizontal offset) out of the editor's working fields.
+    /// The renderer draws the active window from the pane struct, so any
+    /// editor method that moves the cursor or view without syncing leaves
+    /// relative numbers, the cursor-line highlight, or the whole viewport
+    /// one key behind. `handle_key` calls this after every key as the net
+    /// under those methods.
+    pub fn sync_active_pane_view(&mut self) {
+        if let Some(pane) = self.panes.get_mut(self.active_pane) {
+            pane.cursor = self.cursor;
+            pane.viewport_offset = self.viewport_offset;
+            pane.h_offset = self.h_offset;
+        }
+    }
+
     fn save_pane_state(&mut self) {
         self.save_current_undo_stack();
         if self.active_pane < self.panes.len() {
@@ -11004,6 +11019,74 @@ impl Editor {
         if self.active_pane < self.panes.len() {
             self.panes[self.active_pane].viewport_offset = self.viewport_offset;
         }
+    }
+
+    /// Shared prelude of the `z` scroll keys (nvim's nv_zet): a count first
+    /// goes to that line, so `5zt` puts line 5 at the top, and the `z<CR>`
+    /// `z.` `z-` spellings then move to the first non-blank where `zt` `zz`
+    /// `zb` keep the column.
+    pub fn prepare_scroll_target(&mut self, count: Option<usize>, first_non_blank: bool) {
+        if let Some(line) = count {
+            let last = self.buffer().addressable_line_count().saturating_sub(1);
+            self.cursor.line = line.saturating_sub(1).min(last);
+            self.clamp_cursor();
+        }
+        if first_non_blank {
+            self.cursor.col = self.find_first_non_blank(self.cursor.line);
+        }
+        // The renderer reads the pane mirror for relative numbers and the
+        // cursor-line highlight, so a cursor move must sync it (the scroll
+        // functions after this only sync the viewport).
+        if self.active_pane < self.panes.len() {
+            self.panes[self.active_pane].cursor = self.cursor;
+        }
+    }
+
+    /// `zh` / `zl`: scroll the view `delta` columns (negative = left) with
+    /// 'wrap' off. Like Vim's leftcol_changed, the cursor is pulled to the
+    /// nearest visible column, and when its line ends before the new offset
+    /// the view stops at that last character instead.
+    pub fn scroll_columns(&mut self, delta: isize) {
+        if self.settings.editor.wrap {
+            return;
+        }
+        let width = self.text_area_width().max(1);
+        self.h_offset = self.h_offset.saturating_add_signed(delta);
+        let line_end = self.buffer().line_len(self.cursor.line).saturating_sub(1);
+        self.cursor.col = self
+            .cursor
+            .col
+            .max(self.h_offset)
+            .min(self.h_offset + width - 1)
+            .min(line_end);
+        // Pulls h_offset back to the cursor when the line was too short,
+        // and syncs the pane mirror.
+        self.scroll_to_cursor();
+    }
+
+    /// `zH` / `zL`: scroll half a text width per count, left when negative.
+    pub fn scroll_half_screen_columns(&mut self, count: isize) {
+        let half = (self.text_area_width() / 2).max(1) as isize;
+        self.scroll_columns(count.saturating_mul(half));
+    }
+
+    /// `zs`: scroll so the cursor column is the left edge of the screen.
+    pub fn scroll_cursor_to_screen_start(&mut self) {
+        if self.settings.editor.wrap {
+            return;
+        }
+        self.h_offset = self.cursor.col;
+        self.scroll_to_cursor();
+    }
+
+    /// `ze`: scroll so the cursor column is the right edge of the screen.
+    pub fn scroll_cursor_to_screen_end(&mut self) {
+        if self.settings.editor.wrap {
+            return;
+        }
+        let width = self.text_area_width().max(1);
+        self.h_offset = (self.cursor.col + 1).saturating_sub(width);
+        self.scroll_to_cursor();
     }
 
     /// Repeat last change (. command)

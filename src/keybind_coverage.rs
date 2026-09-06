@@ -606,6 +606,53 @@ const KEYBIND_COVERAGE: &[KeybindCoverage] = &[
     vim_oracle("zz", "Center cursor line", "center cursor line"),
     vim_oracle("zt", "Move cursor line to top", "cursor line to top"),
     vim_oracle("zb", "Move cursor line to bottom", "cursor line to bottom"),
+    vim_oracle(
+        "z<CR>",
+        "Cursor line to top, cursor to first non-blank",
+        "z enter puts line at top and goes to first non-blank",
+    ),
+    vim_oracle(
+        "z.",
+        "Center cursor line, cursor to first non-blank",
+        "z dot centers line and goes to first non-blank",
+    ),
+    vim_oracle(
+        "z-",
+        "Cursor line to bottom, cursor to first non-blank",
+        "z minus puts line at bottom and goes to first non-blank",
+    ),
+    // The horizontal offset is invisible to the oracle; zl is pinned by its
+    // cursor side effect, the rest by editor-level tests.
+    vim_oracle(
+        "zl",
+        "Scroll the view right, count columns",
+        "zl drags the cursor to the new left edge",
+    ),
+    nevi_regression(
+        "zh",
+        "Scroll the view left, count columns",
+        "scroll_columns_left_pulls_a_cursor_past_the_right_edge_back_in",
+    ),
+    nevi_regression(
+        "zL",
+        "Scroll the view right half a screen",
+        "half_screen_column_scroll_uses_half_the_text_width",
+    ),
+    nevi_regression(
+        "zH",
+        "Scroll the view left half a screen",
+        "half_screen_column_scroll_uses_half_the_text_width",
+    ),
+    nevi_regression(
+        "zs",
+        "Scroll so the cursor is at the left edge",
+        "zs_and_ze_put_the_cursor_at_the_screen_edges",
+    ),
+    nevi_regression(
+        "ze",
+        "Scroll so the cursor is at the right edge",
+        "zs_and_ze_put_the_cursor_at_the_screen_edges",
+    ),
     // Search-family batch. The prompt-editing keys (Ctrl+b/e/w/u, Ctrl+r,
     // Up/Down) share key spellings with insert/scroll entries above, so they
     // stay pinned by oracle cases without their own inventory rows.
