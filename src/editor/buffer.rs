@@ -847,4 +847,112 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_chain_updates_final_target_and_keeps_every_link() {
+        let tmp = unique_temp_dir("nevi_save_symlink_chain");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let target = tmp.join("real.txt");
+        let link = tmp.join("link.txt");
+        let chain = tmp.join("chain.txt");
+        std::fs::write(&target, "old\n").expect("write target");
+        std::os::unix::fs::symlink("real.txt", &link).expect("symlink link");
+        std::os::unix::fs::symlink("link.txt", &chain).expect("symlink chain");
+
+        let mut buffer = Buffer::from_file(chain.clone()).expect("open chain");
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        for path in [&chain, &link] {
+            assert!(
+                std::fs::symlink_metadata(path)
+                    .expect("link metadata")
+                    .file_type()
+                    .is_symlink(),
+                "{} should still be a symlink",
+                path.display()
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_with_absolute_target_updates_target_and_keeps_link() {
+        let tmp = unique_temp_dir("nevi_save_symlink_absolute");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let target = tmp.join("real.txt");
+        let link = tmp.join("link.txt");
+        std::fs::write(&target, "old\n").expect("write target");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let mut buffer = Buffer::from_file(link.clone()).expect("open link");
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // A loop of links has no real target. The save must still return (the
+    // resolver gives up after a bounded number of hops) and leave the text
+    // readable through both names, rather than spin forever on `:w`.
+    #[cfg(unix)]
+    #[test]
+    fn save_into_symlink_loop_terminates_and_writes_the_text() {
+        let tmp = unique_temp_dir("nevi_save_symlink_loop");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let a = tmp.join("a.txt");
+        let b = tmp.join("b.txt");
+        std::os::unix::fs::symlink("b.txt", &a).expect("symlink a");
+        std::os::unix::fs::symlink("a.txt", &b).expect("symlink b");
+
+        let mut buffer = Buffer::new();
+        buffer.path = Some(a.clone());
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        assert_eq!(std::fs::read_to_string(&a).expect("read a"), "new\n");
+        assert_eq!(std::fs::read_to_string(&b).expect("read b"), "new\n");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // The mtime recorded after a save must be the target's, read through
+    // the link, or the very next `:w` through the same link would be
+    // refused as an external change.
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_leaves_no_external_change_pending() {
+        let tmp = unique_temp_dir("nevi_save_symlink_mtime");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let target = tmp.join("real.txt");
+        let link = tmp.join("link.txt");
+        std::fs::write(&target, "old\n").expect("write target");
+        std::os::unix::fs::symlink("real.txt", &link).expect("symlink");
+
+        let mut buffer = Buffer::from_file(link.clone()).expect("open link");
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        assert!(!buffer.has_external_changes());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
