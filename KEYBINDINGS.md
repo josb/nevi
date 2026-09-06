@@ -289,6 +289,10 @@ nothing.
 | `zz` | Center cursor on screen |
 | `zt` | Move cursor line to top of screen |
 | `zb` | Move cursor line to bottom of screen |
+| `z<CR>` / `z.` / `z-` | Like `zt` / `zz` / `zb`, then move to the first non-blank. All six take a count that goes to that line first: `5zt` puts line 5 at the top |
+| `zh` / `zl` | Scroll the view left / right by a count of columns (wrap off) |
+| `zH` / `zL` | Scroll the view left / right by half a screen (wrap off) |
+| `zs` / `ze` | Scroll so the cursor sits at the left / right edge of the screen (wrap off) |
 
 ### Mouse
 

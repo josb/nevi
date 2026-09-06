@@ -412,6 +412,69 @@ desc = "Move cursor line to bottom of screen"
 status = "implemented"
 vim_default = true
 
+[[normal.scroll]]
+key = "z<CR>"
+action = "cursor_to_top_first_non_blank"
+desc = "Cursor line to top, cursor to first non-blank"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "z."
+action = "cursor_to_center_first_non_blank"
+desc = "Center cursor line, cursor to first non-blank"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "z-"
+action = "cursor_to_bottom_first_non_blank"
+desc = "Cursor line to bottom, cursor to first non-blank"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "zh"
+action = "scroll_columns_left"
+desc = "Scroll the view left by a count of columns (wrap off)"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "zl"
+action = "scroll_columns_right"
+desc = "Scroll the view right by a count of columns (wrap off)"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "zH"
+action = "scroll_half_screen_left"
+desc = "Scroll the view left by half a screen (wrap off)"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "zL"
+action = "scroll_half_screen_right"
+desc = "Scroll the view right by half a screen (wrap off)"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "zs"
+action = "scroll_cursor_to_screen_start"
+desc = "Scroll so the cursor sits at the left edge (wrap off)"
+status = "implemented"
+vim_default = true
+
+[[normal.scroll]]
+key = "ze"
+action = "scroll_cursor_to_screen_end"
+desc = "Scroll so the cursor sits at the right edge (wrap off)"
+status = "implemented"
+vim_default = true
+
 # ----------------------------------------------------------------------------
 # Movement - Jump list
 # ----------------------------------------------------------------------------

@@ -324,6 +324,94 @@ const MOTION_CASES: &[OracleCase] = &[
         initial_text: SCREEN_POSITION_TEXT,
         keys: "50Gzb",
     },
+    // z<CR> / z. / z- scroll like zt / zz / zb and also go to the first
+    // non-blank, where zt keeps the column; all six take a count that
+    // first jumps to that line.
+    OracleCase {
+        name: "z enter puts line at top and goes to first non-blank",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "50G$z<CR>",
+    },
+    OracleCase {
+        name: "z dot centers line and goes to first non-blank",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "50G$z.",
+    },
+    OracleCase {
+        name: "z minus puts line at bottom and goes to first non-blank",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "50G$z-",
+    },
+    OracleCase {
+        name: "zt keeps the column",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "50G$zt",
+    },
+    OracleCase {
+        name: "z enter on an indented line",
+        initial_text: "  a\n    b\n",
+        keys: "j$z<CR>",
+    },
+    OracleCase {
+        name: "counted z enter goes to that line first",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "30z<CR>",
+    },
+    OracleCase {
+        name: "counted zt goes to that line first",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "30zt",
+    },
+    OracleCase {
+        name: "counted zz goes to that line first",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "30zz",
+    },
+    OracleCase {
+        name: "counted zb goes to that line first",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "30zb",
+    },
+    OracleCase {
+        name: "counted z scroll past the end stops at the last line",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "500z<CR>",
+    },
+    OracleCase {
+        name: "counted z enter also goes to the first non-blank",
+        initial_text: "  a\n    b\n      c\n",
+        keys: "$2z<CR>",
+    },
+    OracleCase {
+        name: "z minus on the first line cannot scroll up",
+        initial_text: SCREEN_POSITION_TEXT,
+        keys: "$z-",
+    },
+    // zl scrolls the view sideways ('wrap' is off here) and drags the
+    // cursor along to stay visible. The offset itself is not in the
+    // snapshot, so these pin the cursor side effect. zh, zH, zL, zs and ze
+    // only show through the offset or depend on the text width, which
+    // differs from Neovim's because of the gutter; native tests pin those.
+    OracleCase {
+        name: "zl drags the cursor to the new left edge",
+        initial_text: "abcdefghij\n",
+        keys: "3zl",
+    },
+    OracleCase {
+        name: "zl on a short line stops at its last character",
+        initial_text: "abc\n",
+        keys: "9zl",
+    },
+    OracleCase {
+        name: "counted zl past the line end clamps the cursor",
+        initial_text: "abcdefghij\n",
+        keys: "20zl",
+    },
+    OracleCase {
+        name: "zh leaves a still visible cursor alone",
+        initial_text: "abcdefghij\n",
+        keys: "5zl2zh",
+    },
     OracleCase {
         name: "page down",
         initial_text: SCREEN_POSITION_TEXT,
@@ -1079,6 +1167,28 @@ fn run_nevi_case_with_options(
         handle_key(&mut editor, key);
     }
 
+    // The renderer draws the active window from the pane mirror (content
+    // rows from its viewport, relative numbers and the cursor-line
+    // highlight from its cursor), so a key that leaves the mirror behind
+    // renders wrong even when the snapshot below looks right. Counted `zt`
+    // shipped with exactly that bug, and this check found 19 older ones.
+    let pane = &editor.panes()[editor.active_pane_idx()];
+    if pane.cursor != editor.cursor
+        || pane.viewport_offset != editor.viewport_offset
+        || pane.h_offset != editor.h_offset
+    {
+        return Err(format!(
+            "case `{}`: pane mirror out of sync after keys: editor cursor={:?} viewport={} h_offset={}, pane cursor={:?} viewport={} h_offset={}",
+            case.name,
+            editor.cursor,
+            editor.viewport_offset,
+            editor.h_offset,
+            pane.cursor,
+            pane.viewport_offset,
+            pane.h_offset
+        ));
+    }
+
     Ok(snapshot_nevi(&editor))
 }
 
@@ -1506,6 +1616,43 @@ mod tests {
         .expect("parse snapshot");
 
         assert_eq!(snapshot.viewport_top, 4);
+    }
+
+    #[test]
+    /// Runs every oracle case on the Nevi side only, so the pane-mirror
+    /// check in `run_nevi_case_with_options` is enforced in the normal
+    /// suite without Neovim present.
+    fn pane_mirror_stays_in_sync_after_every_oracle_case() {
+        let mut bad = Vec::new();
+        let mut run = |case: &OracleCase, h: u16, wrap: bool| {
+            if let Err(e) = run_nevi_case_with_options(case, h, wrap) {
+                if e.contains("out of sync") {
+                    bad.push(e);
+                }
+            }
+        };
+        for category in oracle_categories() {
+            for case in category.cases {
+                run(case, ORACLE_TERM_HEIGHT, false);
+            }
+        }
+        for case in SHORT_VIEWPORT_CASES {
+            run(case, ORACLE_SHORT_TERM_HEIGHT, false);
+        }
+        for h in ORACLE_SMALL_TERM_HEIGHTS {
+            for case in SMALL_VIEWPORT_CASES {
+                run(case, *h, false);
+            }
+        }
+        for case in WRAP_ENABLED_CASES {
+            run(case, ORACLE_TERM_HEIGHT, true);
+        }
+        assert!(
+            bad.is_empty(),
+            "{} case(s) left the pane mirror behind:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
     }
 
     #[test]
