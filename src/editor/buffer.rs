@@ -554,6 +554,10 @@ fn write_file_atomically(
     path: &Path,
     write_contents: impl FnOnce(&mut dyn Write) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    // Vim's 'backupcopy=auto' rule: a save through a symlink must update the
+    // link's target, so the temp file and the rename land next to the real
+    // file instead of replacing the link with a regular file.
+    let path = &resolve_symlinks(path);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -592,6 +596,27 @@ fn write_file_atomically(
 
     sync_parent_dir(parent);
     Ok(())
+}
+
+/// Follow a symlink chain to the path it finally names. A dangling link
+/// resolves to its (missing) target so the save creates it, like Vim; a loop
+/// gives up after a bounded number of hops and writes the last link seen.
+fn resolve_symlinks(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..32 {
+        let Ok(target) = fs::read_link(&current) else {
+            break;
+        };
+        current = if target.is_absolute() {
+            target
+        } else {
+            current
+                .parent()
+                .map(|parent| parent.join(&target))
+                .unwrap_or(target)
+        };
+    }
+    current
 }
 
 fn create_save_temp_file(parent: &Path, file_name: &OsStr) -> io::Result<(PathBuf, File)> {
@@ -759,6 +784,65 @@ mod tests {
                 .filter(|entry| entry.file_name().to_string_lossy().contains(".nevi-save-"))
                 .count(),
             0
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Vim's 'backupcopy=auto' rule: saving through a symlink updates the
+    // link's target. Replacing the link with a regular file silently
+    // disconnects symlinked dotfiles from their repo.
+    #[cfg(unix)]
+    #[test]
+    fn save_through_symlink_updates_target_and_keeps_link() {
+        let tmp = unique_temp_dir("nevi_save_symlink");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let target = tmp.join("real.txt");
+        let link = tmp.join("link.txt");
+        std::fs::write(&target, "old\n").expect("write target");
+        std::os::unix::fs::symlink("real.txt", &link).expect("symlink");
+
+        let mut buffer = Buffer::from_file(link.clone()).expect("open link");
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_through_dangling_symlink_creates_target_and_keeps_link() {
+        let tmp = unique_temp_dir("nevi_save_dangling_symlink");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let target = tmp.join("missing.txt");
+        let link = tmp.join("link.txt");
+        std::os::unix::fs::symlink("missing.txt", &link).expect("symlink");
+
+        let mut buffer = Buffer::new();
+        buffer.path = Some(link.clone());
+        buffer.set_content("new\n");
+        buffer.save().expect("save");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "new\n"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
