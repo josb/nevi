@@ -10435,18 +10435,28 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
-/// Execute a parsed command
-/// Helper to create a file and open it in the editor
+/// Helper to create a file and open it in the editor.
+///
+/// `create_new` refuses an existing file atomically, so `:new`/`:touch` on a
+/// path that already exists opens it (like Vim's `:new file`) instead of
+/// truncating it to zero bytes.
 fn create_and_open_file(editor: &mut Editor, path: std::path::PathBuf) -> CommandResult {
-    match std::fs::File::create(&path) {
-        Ok(_) => {
-            if let Err(e) = editor.open_file(path.clone()) {
-                CommandResult::Error(format!("Created file but failed to open: {}", e))
-            } else {
-                CommandResult::Message(format!("Created: {}", path.display()))
-            }
-        }
-        Err(e) => CommandResult::Error(format!("Failed to create file: {}", e)),
+    let created = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(e) => return CommandResult::Error(format!("Failed to create file: {}", e)),
+    };
+    if let Err(e) = editor.open_file(path.clone()) {
+        return CommandResult::Error(format!("Failed to open {}: {}", path.display(), e));
+    }
+    if created {
+        CommandResult::Message(format!("Created: {}", path.display()))
+    } else {
+        CommandResult::Message(format!("Opened existing: {}", path.display()))
     }
 }
 
@@ -10465,6 +10475,16 @@ fn rename_file_impl(
         }
     }
 
+    // `fs::rename` replaces the destination silently on Unix, so refuse a
+    // path that already exists. A same-inode match is allowed so a
+    // case-only rename works on case-insensitive filesystems (macOS).
+    if new_path.exists() && !is_same_file(&old_path, &new_path) {
+        return CommandResult::Error(format!(
+            "Failed to rename: {} already exists",
+            new_path.display()
+        ));
+    }
+
     // Rename the file
     match std::fs::rename(&old_path, &new_path) {
         Ok(_) => {
@@ -10473,6 +10493,22 @@ fn rename_file_impl(
             CommandResult::Message(format!("Renamed to: {}", new_path.display()))
         }
         Err(e) => CommandResult::Error(format!("Failed to rename: {}", e)),
+    }
+}
+
+/// Whether two paths name the same file on disk (same device and inode).
+fn is_same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        a == b
     }
 }
 
@@ -19083,5 +19119,123 @@ mod tests {
             editor.panes()[editor.active_pane_idx()].cursor,
             editor.cursor
         );
+    }
+
+    // `:new`/`:touch` on a path that already exists must open it (Vim's
+    // `:new file` opens the file in a split) rather than truncate it to
+    // zero bytes on the way to opening it.
+    #[test]
+    fn new_file_command_opens_an_existing_file_instead_of_truncating_it() {
+        let tmp = unique_temp_dir("nevi_new_existing");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("keep.txt");
+        std::fs::write(&path, "keep me\n").expect("write keep");
+        let mut editor = Editor::default();
+
+        execute_command(&mut editor, Command::NewFile(path.clone()));
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read keep"),
+            "keep me\n"
+        );
+        assert_eq!(editor.buffer().path.as_ref(), Some(&path));
+        assert_eq!(editor.buffer().content(), "keep me\n");
+        assert_eq!(
+            editor.status_message.as_deref(),
+            Some(format!("Opened existing: {}", path.display()).as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn new_file_command_creates_and_opens_a_missing_file() {
+        let tmp = unique_temp_dir("nevi_new_missing");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("fresh.txt");
+        let mut editor = Editor::default();
+
+        execute_command(&mut editor, Command::NewFile(path.clone()));
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read fresh"), "");
+        assert_eq!(editor.buffer().path.as_ref(), Some(&path));
+        assert_eq!(editor.buffer().content(), "");
+        assert_eq!(
+            editor.status_message.as_deref(),
+            Some(format!("Created: {}", path.display()).as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn new_file_command_creates_missing_parent_directories() {
+        let tmp = unique_temp_dir("nevi_new_nested");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("sub").join("dir").join("deep.txt");
+        let mut editor = Editor::default();
+
+        execute_command(&mut editor, Command::NewFile(path.clone()));
+
+        assert!(path.is_file());
+        assert_eq!(editor.buffer().path.as_ref(), Some(&path));
+        assert_eq!(
+            editor.status_message.as_deref(),
+            Some(format!("Created: {}", path.display()).as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // `:rename`/`:mv` onto a path that already exists must refuse, since
+    // `fs::rename` replaces the destination silently on Unix.
+    #[test]
+    fn rename_file_command_refuses_to_overwrite_an_existing_file() {
+        let tmp = unique_temp_dir("nevi_rename_existing");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let source = tmp.join("a.txt");
+        let taken = tmp.join("b.txt");
+        std::fs::write(&source, "a\n").expect("write a");
+        std::fs::write(&taken, "b\n").expect("write b");
+        let mut editor = Editor::default();
+        editor.open_file(source.clone()).expect("open a");
+
+        execute_command(&mut editor, Command::RenameFile(taken.clone()));
+
+        assert_eq!(std::fs::read_to_string(&taken).expect("read b"), "b\n");
+        assert_eq!(std::fs::read_to_string(&source).expect("read a"), "a\n");
+        assert_eq!(editor.buffer().path.as_ref(), Some(&source));
+        assert!(
+            editor
+                .status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("already exists")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // A case-only rename names the same inode on case-insensitive
+    // filesystems (macOS), so it must not be mistaken for an overwrite.
+    #[test]
+    fn rename_file_command_allows_a_case_only_rename() {
+        let tmp = unique_temp_dir("nevi_rename_case_only");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let source = tmp.join("Notes.txt");
+        let target = tmp.join("notes.txt");
+        std::fs::write(&source, "notes\n").expect("write source");
+        let mut editor = Editor::default();
+        editor.open_file(source.clone()).expect("open source");
+
+        execute_command(&mut editor, Command::RenameFile(target.clone()));
+
+        assert_eq!(editor.buffer().path.as_ref(), Some(&target));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            "notes\n"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
