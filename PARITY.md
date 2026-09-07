@@ -9,14 +9,14 @@ the test suite enforces, so it cannot drift from what is actually verified.
 
 ## Summary
 
-- **360 keybinds implemented** ([KEYBINDINGS.md](KEYBINDINGS.md)), **67 planned** ([KEYBINDS_ROADMAP.md](KEYBINDS_ROADMAP.md))
-- **194 keybinds in the coverage inventory**, each mapped to the automated test that protects it:
-  - 180 verified against real Neovim (v0.11.3) by the Vim oracle
+- **364 keybinds implemented** ([KEYBINDINGS.md](KEYBINDINGS.md)), **63 planned** ([KEYBINDS_ROADMAP.md](KEYBINDS_ROADMAP.md))
+- **202 keybinds in the coverage inventory**, each mapped to the automated test that protects it:
+  - 188 verified against real Neovim (v0.11.3) by the Vim oracle
   - 13 protected by focused Nevi regression tests
   - 1 covered as default-keymap plumbing with dedicated tests
-- **519 oracle cases**: motions (144), editing (173), increment (31), insert-entry (17), open-line (20), replace (27), search (51), text-objects (30), undo-redo (2), visual (24)
+- **564 oracle cases**: motions (144), editing (173), increment (31), insert-entry (17), marks (45), open-line (20), replace (27), search (51), text-objects (30), undo-redo (2), visual (24)
 - **0 tracked coverage gaps**
-- **245 of 452 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
+- **247 of 454 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
 
 ## How the Vim oracle works
 
@@ -75,6 +75,14 @@ claim protection.
 | `g,` | Jump to newer change position | `newer change position` |
 | `'.` | Jump to the line of the last change | `line of last change` |
 | `'^` | Jump to the line of the last insert | `line of last insert` |
+| `'[` | Jump to the first line of the last change or yank | `start line mark after a two line yank` |
+| ``[` | Jump to the exact start of the last change or yank | `start mark after a charwise put` |
+| `']` | Jump to the last line of the last change or yank | `end line mark after a two line yank` |
+| ``]` | Jump to the exact end of the last change or yank | `end mark after a charwise put` |
+| `'<` | Jump to the first line of the last visual selection | `visual start mark goes to the first line of the selection` |
+| ``<` | Jump to the exact start of the last visual selection | `exact visual start mark` |
+| `'>` | Jump to the last line of the last visual selection | `visual end mark goes to the last line of the selection` |
+| ``>` | Jump to the exact end of the last visual selection | `exact visual end mark` |
 | `gi` | Go to last insert position and enter insert mode | `go to last insert position and insert` |
 | `gm` | Move to middle of the screen line | `gm on short line` |
 | `go` | Go to [count] byte of the buffer | `go to byte` |

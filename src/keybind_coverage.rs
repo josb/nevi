@@ -182,6 +182,46 @@ const KEYBIND_COVERAGE: &[KeybindCoverage] = &[
         "line of last insert",
     ),
     vim_oracle(
+        "'[",
+        "Jump to the first line of the last change or yank",
+        "start line mark after a two line yank",
+    ),
+    vim_oracle(
+        "`[",
+        "Jump to the exact start of the last change or yank",
+        "start mark after a charwise put",
+    ),
+    vim_oracle(
+        "']",
+        "Jump to the last line of the last change or yank",
+        "end line mark after a two line yank",
+    ),
+    vim_oracle(
+        "`]",
+        "Jump to the exact end of the last change or yank",
+        "end mark after a charwise put",
+    ),
+    vim_oracle(
+        "'<",
+        "Jump to the first line of the last visual selection",
+        "visual start mark goes to the first line of the selection",
+    ),
+    vim_oracle(
+        "`<",
+        "Jump to the exact start of the last visual selection",
+        "exact visual start mark",
+    ),
+    vim_oracle(
+        "'>",
+        "Jump to the last line of the last visual selection",
+        "visual end mark goes to the last line of the selection",
+    ),
+    vim_oracle(
+        "`>",
+        "Jump to the exact end of the last visual selection",
+        "exact visual end mark",
+    ),
+    vim_oracle(
         "gi",
         "Go to last insert position and enter insert mode",
         "go to last insert position and insert",

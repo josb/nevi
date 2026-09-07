@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod editing_cases;
 mod increment_cases;
 mod insert_entry_cases;
+mod mark_cases;
 mod open_line_cases;
 mod replace_cases;
 mod search_cases;
@@ -17,6 +18,7 @@ mod visual_cases;
 use editing_cases::EDITING_CASES;
 use increment_cases::INCREMENT_CASES;
 use insert_entry_cases::INSERT_ENTRY_CASES;
+use mark_cases::MARK_CASES;
 use open_line_cases::OPEN_LINE_CASES;
 use replace_cases::REPLACE_CASES;
 use search_cases::SEARCH_CASES;
@@ -1010,6 +1012,10 @@ const ORACLE_CATEGORIES: &[OracleCategory] = &[
     OracleCategory {
         name: "insert-entry",
         cases: INSERT_ENTRY_CASES,
+    },
+    OracleCategory {
+        name: "marks",
+        cases: MARK_CASES,
     },
     OracleCategory {
         name: "open-line",

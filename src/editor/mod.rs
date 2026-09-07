@@ -271,6 +271,26 @@ pub struct LastVisualSelection {
     pub cursor_col: usize,
 }
 
+impl LastVisualSelection {
+    /// The `'<` and `'>` positions: the selection's ends in buffer order.
+    /// A linewise selection spans whole lines (Vim keeps its end column
+    /// past any text), a block spans its corner columns on every line.
+    pub fn bounds(&self) -> ((usize, usize), (usize, usize)) {
+        let anchor = (self.anchor_line, self.anchor_col);
+        let cursor = (self.cursor_line, self.cursor_col);
+        let (start, end) = (anchor.min(cursor), anchor.max(cursor));
+        match self.mode {
+            Mode::VisualLine => ((start.0, 0), (end.0, usize::MAX)),
+            Mode::VisualBlock => {
+                let left = self.anchor_col.min(self.cursor_col);
+                let right = self.anchor_col.max(self.cursor_col);
+                ((start.0, left), (end.0, right))
+            }
+            _ => (start, end),
+        }
+    }
+}
+
 /// Pending Visual Block insert/append replay state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualBlockEdit {
@@ -1179,6 +1199,8 @@ pub struct Editor {
     pub dot_repeat: crate::dot_repeat::DotRepeat,
     /// Last insert position for `gi` command (line, col)
     pub last_insert_position: Option<(usize, usize)>,
+    /// Where the active insert session began, the `'[` mark once it ends.
+    insert_session_start: (usize, usize),
     /// Text inserted during the most recently completed insert session.
     pub last_inserted_text: Option<String>,
     /// Text inserted during the active insert session.
@@ -1693,6 +1715,7 @@ impl Editor {
             macros: MacroState::new(),
             dot_repeat: crate::dot_repeat::DotRepeat::default(),
             last_insert_position: None,
+            insert_session_start: (0, 0),
             last_inserted_text: None,
             current_inserted_text: String::new(),
             insert_session_repeat_count: 1,
@@ -4378,7 +4401,6 @@ impl Editor {
             return;
         }
         self.mode = Mode::Insert;
-        self.begin_insert_session();
         self.cursor.line = line.min(
             self.buffers[self.current_buffer_idx]
                 .addressable_line_count()
@@ -4386,6 +4408,8 @@ impl Editor {
         );
         self.cursor.col = col.min(self.buffers[self.current_buffer_idx].line_len(self.cursor.line));
         self.last_insert_position = Some((self.cursor.line, self.cursor.col));
+        // After the cursor is placed, so the session (and '[) starts there.
+        self.begin_insert_session();
         self.clamp_cursor();
         self.scroll_to_cursor();
     }
@@ -5049,12 +5073,14 @@ impl Editor {
     pub fn yank_motion(&mut self, motion: Motion, count: usize, register: Option<char>) {
         if let Some((start_line, start_col, end_line, end_col)) = self.motion_range(motion, count) {
             let text = self.get_range_text(start_line, start_col, end_line, end_col);
-            let content = if Self::motion_is_linewise(motion) {
+            let linewise = Self::motion_is_linewise(motion);
+            let content = if linewise {
                 RegisterContent::Lines(text)
             } else {
                 RegisterContent::Chars(text)
             };
             self.registers.yank(register, content);
+            self.set_yank_marks(start_line, start_col, end_line, end_col, linewise);
             self.set_status("Yanked");
         }
     }
@@ -5068,6 +5094,7 @@ impl Editor {
         );
         let text = self.get_lines_text(self.cursor.line, end_line);
         self.registers.yank(register, RegisterContent::Lines(text));
+        self.set_yank_marks(self.cursor.line, 0, end_line, 0, true);
 
         let msg = if count == 1 {
             "1 line yanked".to_string()
@@ -5678,6 +5705,7 @@ impl Editor {
     }
 
     fn begin_insert_session(&mut self) {
+        self.insert_session_start = (self.cursor.line, self.cursor.col);
         self.current_inserted_text.clear();
         self.insert_session_repeat_count = 1;
         self.insert_session_open_line_indent = None;
@@ -5905,6 +5933,12 @@ impl Editor {
             self.last_insert_position = Some((self.cursor.line, self.cursor.col));
             self.replay_pending_visual_block_edit();
             self.finish_insert_session();
+            // '[ and ']: from where the insert began to where typing
+            // stopped, which may sit one past the last inserted character.
+            self.undo_stack.set_op_marks(
+                self.insert_session_start,
+                (self.cursor.line, self.cursor.col),
+            );
         } else if self.mode == Mode::Replace {
             self.last_insert_position = Some((self.cursor.line, self.cursor.col));
             self.finish_replace_session();
@@ -6857,6 +6891,39 @@ impl Editor {
         }
     }
 
+    /// `'[` `']` `'<` `'>` and their backtick forms. The change marks
+    /// bracket the last changed or yanked text and default to the whole
+    /// buffer, as Vim sets them when a file is read; the visual marks are
+    /// the last selection in buffer order. Returns false when unset.
+    pub fn jump_to_special_mark(&mut self, mark: char, exact: bool) -> bool {
+        let last_line = self.buffer().addressable_line_count().saturating_sub(1);
+        let (start, end) = match mark {
+            '[' | ']' => self
+                .undo_stack
+                .op_marks()
+                .unwrap_or(((0, 0), (last_line, 0))),
+            '<' | '>' => match &self.last_visual_selection {
+                Some(selection) => selection.bounds(),
+                None => return false,
+            },
+            _ => return false,
+        };
+        let (line, col) = if matches!(mark, '[' | '<') {
+            start
+        } else {
+            end
+        };
+        self.cursor.line = line.min(last_line);
+        self.cursor.col = if exact {
+            col
+        } else {
+            self.find_first_non_blank(self.cursor.line)
+        };
+        self.clamp_cursor();
+        self.scroll_to_cursor();
+        true
+    }
+
     /// Begin an undo group and record change position
     /// This should be called before making changes to the buffer
     pub fn begin_change(&mut self) {
@@ -7090,6 +7157,10 @@ impl Editor {
                 );
             }
 
+            // '[ and '] bracket the restored lines at column zero, like Vim.
+            let (first, last) = entry.touched_lines(true);
+            self.undo_stack.set_op_marks((first, 0), (last, 0));
+
             // Restore cursor position
             self.cursor.line = entry.cursor_before.0;
             self.cursor.col = entry.cursor_before.1;
@@ -7118,6 +7189,9 @@ impl Editor {
                     &change.new_text, // Insert new text
                 );
             }
+
+            let (first, last) = entry.touched_lines(false);
+            self.undo_stack.set_op_marks((first, 0), (last, 0));
 
             // Restore cursor position
             self.cursor.line = entry.cursor_after.0;
@@ -8316,6 +8390,7 @@ impl Editor {
                 // Line-wise yank
                 let text = self.get_lines_text(start_line, end_line);
                 self.registers.yank(None, RegisterContent::Lines(text));
+                self.set_yank_marks(start_line, 0, end_line, 0, true);
                 let count = end_line - start_line + 1;
                 self.set_status(format!("{} line(s) yanked", count));
             }
@@ -8323,6 +8398,7 @@ impl Editor {
                 // Character-wise yank
                 let text = self.get_range_text(start_line, start_col, end_line, end_col);
                 self.registers.yank(None, RegisterContent::Chars(text));
+                self.set_yank_marks(start_line, start_col, end_line, end_col, false);
                 self.set_status("Yanked");
             }
             Mode::VisualBlock => {
@@ -8357,22 +8433,25 @@ impl Editor {
                     .yank(None, RegisterContent::Chars(block_text));
                 let count = bottom - top + 1;
                 self.set_status(format!("block of {} line(s) yanked", count));
+                self.set_yank_marks(top, left, bottom, right, false);
 
-                // For block yank, cursor goes to top-left
+                // Leave Visual mode before moving so '< and '> keep the
+                // selection; for block yank the cursor goes to top-left.
+                self.exit_visual_mode();
                 self.cursor.line = top;
                 self.cursor.col = left;
                 self.clamp_cursor();
-                self.mode = Mode::Normal;
                 self.scroll_to_cursor();
                 return;
             }
             _ => {}
         }
 
-        // Move cursor to start of selection
+        // Leave Visual mode before moving so '< and '> keep the selection,
+        // then put the cursor at its start.
+        self.exit_visual_mode();
         self.cursor.line = start_line;
         self.cursor.col = start_col;
-        self.mode = Mode::Normal;
         self.scroll_to_cursor();
     }
 
@@ -9448,8 +9527,26 @@ impl Editor {
         {
             let text = self.get_range_text(start_line, start_col, end_line, end_col);
             self.registers.yank(register, RegisterContent::Chars(text));
+            self.set_yank_marks(start_line, start_col, end_line, end_col, false);
             self.set_status("Yanked");
         }
+    }
+
+    /// `'[` and `']` around yanked text; a linewise yank spans whole lines.
+    fn set_yank_marks(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        linewise: bool,
+    ) {
+        let (start, end) = if linewise {
+            ((start_line, 0), (end_line, usize::MAX))
+        } else {
+            ((start_line, start_col), (end_line, end_col))
+        };
+        self.undo_stack.set_op_marks(start, end);
     }
 
     /// Select text object in visual mode
@@ -9567,9 +9664,19 @@ impl Editor {
             self.cursor.col = 0;
         }
 
+        self.set_join_marks(current_line_len);
         self.undo_stack
             .end_undo_group(self.cursor.line, self.cursor.col);
         self.clamp_cursor();
+    }
+
+    /// Vim's marks after J and gJ: `'[` at the end of the first line's
+    /// original text, `']` at the end of the joined line.
+    fn set_join_marks(&mut self, first_line_len: usize) {
+        let line = self.cursor.line;
+        let joined_len = self.buffers[self.current_buffer_idx].line_len(line);
+        self.undo_stack
+            .set_op_marks((line, first_line_len), (line, joined_len));
     }
 
     /// Join count lines total, matching Vim's J count behavior.
@@ -9577,6 +9684,7 @@ impl Editor {
         let joins = count.max(2).saturating_sub(1);
         // One change for the whole count, so a single undo restores every
         // line like Vim; each join opens its own group otherwise.
+        let first_line_len = self.buffers[self.current_buffer_idx].line_len(self.cursor.line);
         self.undo_stack
             .begin_compound_group(self.cursor.line, self.cursor.col);
         for _ in 0..joins {
@@ -9586,6 +9694,7 @@ impl Editor {
                 break;
             }
         }
+        self.set_join_marks(first_line_len);
         self.undo_stack
             .end_compound_group(self.cursor.line, self.cursor.col);
     }
@@ -9619,6 +9728,7 @@ impl Editor {
         // Position cursor at the join point
         self.cursor.col = current_line_len;
 
+        self.set_join_marks(current_line_len);
         self.undo_stack
             .end_undo_group(self.cursor.line, self.cursor.col);
         self.clamp_cursor();
@@ -9627,6 +9737,7 @@ impl Editor {
     /// Join count lines total without inserting spaces, matching gJ with count.
     pub fn join_lines_no_space_count(&mut self, count: usize) {
         let joins = count.max(2).saturating_sub(1);
+        let first_line_len = self.buffers[self.current_buffer_idx].line_len(self.cursor.line);
         self.undo_stack
             .begin_compound_group(self.cursor.line, self.cursor.col);
         for _ in 0..joins {
@@ -9636,6 +9747,7 @@ impl Editor {
                 break;
             }
         }
+        self.set_join_marks(first_line_len);
         self.undo_stack
             .end_compound_group(self.cursor.line, self.cursor.col);
     }
@@ -12490,6 +12602,7 @@ mod tests {
     mod replace;
     mod screen_position;
     mod shada;
+    mod special_marks;
     mod viewport_scroll;
 
     use super::{Editor, JumpList, Mode, SearchDirection, SplitLayout};
