@@ -4,7 +4,7 @@ Nevi aims for full vim/neovim keybind compatibility. Defaults follow Neovim, and
 keybinds are configurable — sensible defaults out of the box, overridable to your
 own taste.
 
-**Status: 366 keybinds implemented, 61 planned Vim/Neovim parity defaults.**
+**Status: 370 keybinds implemented, 57 planned Vim/Neovim parity defaults.**
 
 This file tracks what's **planned** (not yet implemented). For the full list of
 keybinds that already work, see [KEYBINDINGS.md](KEYBINDINGS.md). This list comes
@@ -45,15 +45,6 @@ the larger areas, folds and quickfix before tabs and tags.
 | `gww` | Format the current line, keeping the cursor position |
 | `&` | Repeat the last `:s` substitution on the current line |
 | `g&` | Repeat the last `:s` on all lines with the same flags |
-
-### Jumps And Marks
-
-| Keybind | Planned behavior |
-|---------|------------------|
-| `'[` / `']` | Jump to the first / last line of the last change or yank |
-| `` `[ `` / `` `] `` | Jump to the exact start / end of the last change or yank |
-| `'<` / `'>` | Jump to the first / last line of the last visual selection |
-| `` `< `` / `` `> `` | Jump to the exact start / end of the last visual selection |
 
 ### Command-Line Mode Defaults
 

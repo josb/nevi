@@ -8135,6 +8135,12 @@ fn handle_normal_mode(editor: &mut Editor, key: KeyEvent) {
             }
         }
 
+        KeyAction::JumpToSpecialMark(mark, exact) => {
+            if !editor.jump_to_special_mark(mark, exact) {
+                editor.set_status("Mark not set");
+            }
+        }
+
         KeyAction::ChangeListOlder => {
             if !editor.change_list_older() {
                 editor.set_status("Already at oldest change");

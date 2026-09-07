@@ -336,6 +336,10 @@ Navigate through positions where you made edits.
 | <code>`.</code> | Jump to the exact position of the last change |
 | `'^` | Jump to the line of the last insert |
 | <code>`^</code> | Jump to the exact position of the last insert |
+| `'[` / `']` | Jump to the first / last line of the last changed or yanked text |
+| <code>`[</code> / <code>`]</code> | Jump to the exact start / end of the last changed or yanked text |
+| `'<` / `'>` | Jump to the first / last line of the last visual selection |
+| <code>`<</code> / <code>`></code> | Jump to the exact start / end of the last visual selection |
 | `gi` | Go to last insert position and enter insert mode |
 
 ---

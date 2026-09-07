@@ -299,6 +299,10 @@ pub enum KeyAction {
     JumpToLastInsert,
     /// Jump to exact position of last insert (`^)
     JumpToLastInsertExact,
+    /// Jump to a special mark: `[` `]` (last change or yank) or `<` `>`
+    /// (last Visual selection); the flag picks the exact column over the
+    /// line's first non-blank
+    JumpToSpecialMark(char, bool),
     /// Go to older change position (g;)
     ChangeListOlder,
     /// Go to newer change position (g,)
@@ -725,6 +729,10 @@ impl InputState {
                     self.reset();
                     return KeyAction::JumpToLastInsert;
                 }
+                if matches!(c, '[' | ']' | '<' | '>') {
+                    self.reset();
+                    return KeyAction::JumpToSpecialMark(c, false);
+                }
                 if c.is_ascii_alphabetic() {
                     self.reset();
                     return KeyAction::GotoMarkLine(c);
@@ -750,6 +758,10 @@ impl InputState {
                     // `^ - jump to exact position of last insert
                     self.reset();
                     return KeyAction::JumpToLastInsertExact;
+                }
+                if matches!(c, '[' | ']' | '<' | '>') {
+                    self.reset();
+                    return KeyAction::JumpToSpecialMark(c, true);
                 }
                 if c.is_ascii_alphabetic() {
                     self.reset();
@@ -3031,6 +3043,16 @@ mod tests {
         match run(&[key('`'), key('a')]) {
             KeyAction::GotoMarkExact('a') => {}
             other => panic!("expected GotoMarkExact, got {:?}", other),
+        }
+        for mark in ['[', ']', '<', '>'] {
+            assert!(matches!(
+                run(&[key('\''), key(mark)]),
+                KeyAction::JumpToSpecialMark(m, false) if m == mark
+            ));
+            assert!(matches!(
+                run(&[key('`'), key(mark)]),
+                KeyAction::JumpToSpecialMark(m, true) if m == mark
+            ));
         }
         match run(&[key('\''), key('\'')]) {
             KeyAction::JumpToPreviousPosition => {}

@@ -536,6 +536,62 @@ status = "implemented"
 vim_default = true
 
 [[normal.jumps]]
+key = "'["
+action = "jump_to_change_start"
+desc = "Jump to first line of last changed or yanked text"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "`["
+action = "jump_to_change_start_exact"
+desc = "Jump to exact start of last changed or yanked text"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "']"
+action = "jump_to_change_end"
+desc = "Jump to last line of last changed or yanked text"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "`]"
+action = "jump_to_change_end_exact"
+desc = "Jump to exact end of last changed or yanked text"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "'<"
+action = "jump_to_visual_start"
+desc = "Jump to first line of last visual selection"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "`<"
+action = "jump_to_visual_start_exact"
+desc = "Jump to exact start of last visual selection"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "'>"
+action = "jump_to_visual_end"
+desc = "Jump to last line of last visual selection"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
+key = "`>"
+action = "jump_to_visual_end_exact"
+desc = "Jump to exact end of last visual selection"
+status = "implemented"
+vim_default = true
+
+[[normal.jumps]]
 key = "gi"
 action = "goto_last_insert_and_insert"
 desc = "Jump to last insert position and enter insert mode"
