@@ -157,12 +157,21 @@ pub enum KeyAction {
     JoinLines(usize),
     /// Join lines without space (gJ)
     JoinLinesNoSpace(usize),
-    /// Scroll cursor to center of screen (zz)
-    ScrollCenter,
-    /// Scroll cursor to top of screen (zt)
-    ScrollTop,
-    /// Scroll cursor to bottom of screen (zb)
-    ScrollBottom,
+    /// Scroll cursor line to the center (zz, z.). The count first goes to
+    /// that line; the flag also moves to the first non-blank (z.).
+    ScrollCenter(Option<usize>, bool),
+    /// Scroll cursor line to the top (zt, z<CR>), same fields as ScrollCenter
+    ScrollTop(Option<usize>, bool),
+    /// Scroll cursor line to the bottom (zb, z-), same fields as ScrollCenter
+    ScrollBottom(Option<usize>, bool),
+    /// Scroll the view sideways by count columns, negative = left (zh, zl)
+    ScrollColumns(isize),
+    /// Scroll the view sideways by count half screens, negative = left (zH, zL)
+    ScrollHalfScreenColumns(isize),
+    /// Scroll so the cursor column is the left edge of the screen (zs)
+    ScrollCursorToScreenStart,
+    /// Scroll so the cursor column is the right edge of the screen (ze)
+    ScrollCursorToScreenEnd,
     /// Scroll viewport down count lines without moving the cursor (<C-e>)
     ScrollLineDown(usize),
     /// Scroll viewport up count lines without moving the cursor (<C-y>)
@@ -1553,20 +1562,63 @@ impl InputState {
                 self.reset();
                 KeyAction::ChangeListNewer
             }
-            // zz - scroll cursor to center of screen
+            // zz / zt / zb keep the column; z. / z<CR> / z- also go to the
+            // first non-blank. A count typed before z first jumps to that
+            // line (nvim nv_zet), so "5zt" puts line 5 at the top.
             ('z', KeyModifiers::NONE, KeyCode::Char('z')) => {
+                let line = self.count;
                 self.reset();
-                KeyAction::ScrollCenter
+                KeyAction::ScrollCenter(line, false)
             }
-            // zt - scroll cursor to top of screen
+            ('z', KeyModifiers::NONE, KeyCode::Char('.')) => {
+                let line = self.count;
+                self.reset();
+                KeyAction::ScrollCenter(line, true)
+            }
             ('z', KeyModifiers::NONE, KeyCode::Char('t')) => {
+                let line = self.count;
                 self.reset();
-                KeyAction::ScrollTop
+                KeyAction::ScrollTop(line, false)
             }
-            // zb - scroll cursor to bottom of screen
-            ('z', KeyModifiers::NONE, KeyCode::Char('b')) => {
+            ('z', KeyModifiers::NONE, KeyCode::Enter) => {
+                let line = self.count;
                 self.reset();
-                KeyAction::ScrollBottom
+                KeyAction::ScrollTop(line, true)
+            }
+            ('z', KeyModifiers::NONE, KeyCode::Char('b')) => {
+                let line = self.count;
+                self.reset();
+                KeyAction::ScrollBottom(line, false)
+            }
+            ('z', KeyModifiers::NONE, KeyCode::Char('-')) => {
+                let line = self.count;
+                self.reset();
+                KeyAction::ScrollBottom(line, true)
+            }
+            // Horizontal view scrolling; the editor ignores it with 'wrap' on.
+            ('z', KeyModifiers::NONE, KeyCode::Char('h')) => {
+                self.reset();
+                KeyAction::ScrollColumns(-(count as isize))
+            }
+            ('z', KeyModifiers::NONE, KeyCode::Char('l')) => {
+                self.reset();
+                KeyAction::ScrollColumns(count as isize)
+            }
+            ('z', KeyModifiers::SHIFT, KeyCode::Char('H')) => {
+                self.reset();
+                KeyAction::ScrollHalfScreenColumns(-(count as isize))
+            }
+            ('z', KeyModifiers::SHIFT, KeyCode::Char('L')) => {
+                self.reset();
+                KeyAction::ScrollHalfScreenColumns(count as isize)
+            }
+            ('z', KeyModifiers::NONE, KeyCode::Char('s')) => {
+                self.reset();
+                KeyAction::ScrollCursorToScreenStart
+            }
+            ('z', KeyModifiers::NONE, KeyCode::Char('e')) => {
+                self.reset();
+                KeyAction::ScrollCursorToScreenEnd
             }
             // ZZ - write if modified and quit
             ('Z', KeyModifiers::SHIFT, KeyCode::Char('Z')) => {
@@ -2558,17 +2610,58 @@ mod tests {
         assert_page_motion(&[key('1'), ctrl('d')], Motion::HalfPageDown, Some(1));
 
         match run(&[key('z'), key('z')]) {
-            KeyAction::ScrollCenter => {}
+            KeyAction::ScrollCenter(None, false) => {}
             other => panic!("expected ScrollCenter, got {:?}", other),
         }
         match run(&[key('z'), key('t')]) {
-            KeyAction::ScrollTop => {}
+            KeyAction::ScrollTop(None, false) => {}
             other => panic!("expected ScrollTop, got {:?}", other),
         }
         match run(&[key('z'), key('b')]) {
-            KeyAction::ScrollBottom => {}
+            KeyAction::ScrollBottom(None, false) => {}
             other => panic!("expected ScrollBottom, got {:?}", other),
         }
+        // The first-non-blank spellings, counts, and the horizontal family.
+        assert!(matches!(
+            run(&[key('z'), enter()]),
+            KeyAction::ScrollTop(None, true)
+        ));
+        assert!(matches!(
+            run(&[key('5'), key('z'), key('.')]),
+            KeyAction::ScrollCenter(Some(5), true)
+        ));
+        assert!(matches!(
+            run(&[key('z'), key('-')]),
+            KeyAction::ScrollBottom(None, true)
+        ));
+        assert!(matches!(
+            run(&[key('3'), key('z'), key('t')]),
+            KeyAction::ScrollTop(Some(3), false)
+        ));
+        assert!(matches!(
+            run(&[key('z'), key('l')]),
+            KeyAction::ScrollColumns(1)
+        ));
+        assert!(matches!(
+            run(&[key('4'), key('z'), key('h')]),
+            KeyAction::ScrollColumns(-4)
+        ));
+        assert!(matches!(
+            run(&[key('z'), shift('L')]),
+            KeyAction::ScrollHalfScreenColumns(1)
+        ));
+        assert!(matches!(
+            run(&[key('2'), key('z'), shift('H')]),
+            KeyAction::ScrollHalfScreenColumns(-2)
+        ));
+        assert!(matches!(
+            run(&[key('z'), key('s')]),
+            KeyAction::ScrollCursorToScreenStart
+        ));
+        assert!(matches!(
+            run(&[key('z'), key('e')]),
+            KeyAction::ScrollCursorToScreenEnd
+        ));
 
         match run(&[ctrl('o')]) {
             KeyAction::JumpBack => {}

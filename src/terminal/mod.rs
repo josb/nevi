@@ -7195,8 +7195,16 @@ impl ContentRowDamageCandidate {
     }
 }
 
-/// Handle a key event and update editor state
+/// Handle a key event and update editor state. The active pane's mirror is
+/// synced afterwards whatever path the key took, because the renderer
+/// draws the active window from the pane struct (see
+/// `Editor::sync_active_pane_view`).
 pub fn handle_key(editor: &mut Editor, key: KeyEvent) {
+    handle_key_inner(editor, key);
+    editor.sync_active_pane_view();
+}
+
+fn handle_key_inner(editor: &mut Editor, key: KeyEvent) {
     let cursor_row_damage = CursorRowDamageCandidate::capture(editor, key);
     let cursor_same_row_damage = CursorSameRowDamageCandidate::capture(editor, key);
     let content_row_damage = ContentRowDamageCandidate::capture(editor, key);
@@ -7770,16 +7778,35 @@ fn handle_normal_mode(editor: &mut Editor, key: KeyEvent) {
             editor.join_lines_no_space_count(count);
         }
 
-        KeyAction::ScrollCenter => {
+        KeyAction::ScrollCenter(count, first_non_blank) => {
+            editor.prepare_scroll_target(count, first_non_blank);
             editor.scroll_cursor_center();
         }
 
-        KeyAction::ScrollTop => {
+        KeyAction::ScrollTop(count, first_non_blank) => {
+            editor.prepare_scroll_target(count, first_non_blank);
             editor.scroll_cursor_top();
         }
 
-        KeyAction::ScrollBottom => {
+        KeyAction::ScrollBottom(count, first_non_blank) => {
+            editor.prepare_scroll_target(count, first_non_blank);
             editor.scroll_cursor_bottom();
+        }
+
+        KeyAction::ScrollColumns(delta) => {
+            editor.scroll_columns(delta);
+        }
+
+        KeyAction::ScrollHalfScreenColumns(count) => {
+            editor.scroll_half_screen_columns(count);
+        }
+
+        KeyAction::ScrollCursorToScreenStart => {
+            editor.scroll_cursor_to_screen_start();
+        }
+
+        KeyAction::ScrollCursorToScreenEnd => {
+            editor.scroll_cursor_to_screen_end();
         }
 
         KeyAction::ScrollLineDown(count) => {
@@ -14580,6 +14607,168 @@ mod tests {
     }
 
     #[test]
+    fn z_horizontal_scroll_keys_reach_the_editor() {
+        // zs, ze, zH and zL leave no trace in the oracle snapshot, so pin
+        // the key dispatch here; the column math has editor-level tests.
+        let mut editor = Editor::default();
+        editor.set_size(40, 10);
+        editor.settings.editor.wrap = false;
+        editor.replace_buffer_content(&format!("{}\n", "x".repeat(200)));
+
+        handle_key(&mut editor, key('z'));
+        handle_key(&mut editor, shift_key('L'));
+        assert!(editor.h_offset > 0);
+        assert_eq!(editor.cursor.col, editor.h_offset);
+
+        handle_key(&mut editor, key('z'));
+        handle_key(&mut editor, shift_key('H'));
+        assert_eq!(editor.h_offset, 0);
+
+        editor.cursor.col = 100;
+        handle_key(&mut editor, key('z'));
+        handle_key(&mut editor, key('s'));
+        assert_eq!(editor.h_offset, 100);
+
+        handle_key(&mut editor, key('z'));
+        handle_key(&mut editor, key('e'));
+        assert!(editor.h_offset > 0 && editor.h_offset < 100);
+        assert_eq!(editor.cursor.col, 100);
+    }
+
+    // The after-key pane-mirror sync touches every key, so pin the paths
+    // where copying editor state into the active pane could go wrong:
+    // overlays with their own selection, pane switching, and a per-pane
+    // horizontal offset.
+    #[test]
+    fn explorer_navigation_leaves_the_file_cursor_and_its_mirror_alone() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("a\nb\nc\nd\n");
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, key('j'));
+        assert_eq!(editor.cursor.line, 2);
+
+        editor.mode = Mode::Explorer;
+        editor.explorer.visible = true;
+        editor.explorer.flat_view = (0..5)
+            .map(|idx| FlatNode {
+                path: PathBuf::from(format!("/tmp/nevi-explorer-sync/file_{idx}.txt")),
+                name: format!("file_{idx}.txt"),
+                is_dir: false,
+                depth: 1,
+                is_expanded: false,
+            })
+            .collect();
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, key('j'));
+        assert_eq!(
+            editor.explorer.selected, 2,
+            "explorer moved its own selection"
+        );
+        handle_key(&mut editor, esc_key());
+
+        assert_eq!(editor.mode, Mode::Normal);
+        assert_eq!(
+            editor.cursor.line, 2,
+            "file cursor untouched by the explorer"
+        );
+        assert_eq!(
+            editor.panes()[editor.active_pane_idx()].cursor,
+            editor.cursor
+        );
+    }
+
+    #[test]
+    fn switching_panes_keeps_each_panes_cursor_mirror() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("a\nb\nc\nd\n");
+        editor.set_size(80, 24);
+        editor.vsplit(None).expect("vsplit");
+        editor.update_pane_rects();
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, key('j'));
+        let first = editor.active_pane_idx();
+
+        handle_key(&mut editor, ctrl_key('w'));
+        handle_key(&mut editor, key('w'));
+        let second = editor.active_pane_idx();
+        assert_ne!(first, second);
+        assert_eq!(
+            editor.panes()[first].cursor.line,
+            2,
+            "left pane remembers its cursor"
+        );
+        assert_eq!(editor.cursor.line, 0, "the other pane has its own cursor");
+
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, ctrl_key('w'));
+        handle_key(&mut editor, key('w'));
+        assert_eq!(editor.active_pane_idx(), first);
+        assert_eq!(editor.cursor.line, 2);
+        assert_eq!(editor.panes()[second].cursor.line, 1);
+        assert_eq!(editor.panes()[first].cursor, editor.cursor);
+    }
+
+    #[test]
+    fn zl_scrolls_only_the_active_pane() {
+        let mut editor = Editor::default();
+        editor.set_size(120, 24);
+        editor.settings.editor.wrap = false;
+        editor.replace_buffer_content(&format!("{}\n", "x".repeat(300)));
+        editor.vsplit(None).expect("vsplit");
+        editor.update_pane_rects();
+        let active = editor.active_pane_idx();
+        let other = 1 - active;
+
+        handle_key(&mut editor, key('5'));
+        handle_key(&mut editor, key('z'));
+        handle_key(&mut editor, key('l'));
+        assert_eq!(editor.h_offset, 5);
+        assert_eq!(editor.panes()[active].h_offset, 5);
+        assert_eq!(editor.panes()[other].h_offset, 0);
+
+        handle_key(&mut editor, ctrl_key('w'));
+        handle_key(&mut editor, key('w'));
+        assert_eq!(editor.h_offset, 0, "the other pane keeps its own offset");
+        handle_key(&mut editor, ctrl_key('w'));
+        handle_key(&mut editor, key('w'));
+        assert_eq!(editor.h_offset, 5, "and the scrolled pane keeps its own");
+    }
+
+    #[test]
+    fn cancelling_a_search_restores_the_view_the_screen_draws_from() {
+        // Found by the oracle's pane-mirror guard: the Esc restore reset the
+        // editor's viewport but left the pane mirror at the distant match,
+        // so the screen stayed there until the next key.
+        let mut editor = Editor::default();
+        editor.set_size(40, 10);
+        let mut content = String::new();
+        for i in 0..40 {
+            content.push_str(&format!("filler {i}\n"));
+        }
+        content.push_str("beta\n");
+        editor.replace_buffer_content(&content);
+
+        for k in "/beta".chars() {
+            handle_key(&mut editor, key(k));
+        }
+        assert!(
+            editor.viewport_offset > 0,
+            "the preview scrolled to the match"
+        );
+        assert_eq!(
+            editor.panes()[editor.active_pane_idx()].viewport_offset,
+            editor.viewport_offset
+        );
+
+        handle_key(&mut editor, esc_key());
+
+        assert_eq!((editor.viewport_offset, editor.cursor.line), (0, 0));
+        let pane = &editor.panes()[editor.active_pane_idx()];
+        assert_eq!(pane.viewport_offset, 0, "the screen draws from the pane");
+        assert_eq!(pane.cursor, editor.cursor);
+    }
+
+    #[test]
     fn insert_unhandled_ctrl_chord_does_not_type_its_letter() {
         // Issue #281: i<C-v><C-y> wrote "vy" because unhandled ctrl chords
         // fell through to the plain-character arm.
@@ -18869,6 +19058,73 @@ mod tests {
         handle_key(&mut editor, key('"'));
 
         assert_eq!(editor.buffer().content(), "\"hello world\"\n");
+    }
+
+    fn without_ansi(raw: &str) -> String {
+        let mut plain = String::new();
+        let mut it = raw.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\u{1b}' {
+                while let Some(&n) = it.peek() {
+                    it.next();
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(c);
+            }
+        }
+        plain
+    }
+
+    #[test]
+    fn counted_zt_keeps_relative_numbers_anchored_to_the_cursor() {
+        // The renderer reads the pane's copy of the cursor for relative
+        // numbers. A count jump that moved only the editor's cursor left
+        // the mirror at line 1, so every gutter showed its raw line index
+        // (49 next to "line 050") instead of a distance.
+        let mut editor = Editor::default();
+        let content: String = (1..=100).map(|i| format!("line {i:03}\n")).collect();
+        editor.replace_buffer_content(&content);
+        editor.settings.editor.relative_numbers = true;
+        editor.set_size(80, 24);
+        editor.update_pane_rects();
+        for k in [key('g'), key('g'), key('5'), key('0'), key('z'), key('t')] {
+            handle_key(&mut editor, k);
+        }
+        assert_eq!(editor.cursor.line, 49);
+        assert_eq!(
+            editor.panes()[editor.active_pane_idx()].cursor,
+            editor.cursor
+        );
+
+        let plain = without_ansi(&render_editor_to_string(&editor));
+        assert!(
+            plain.contains(" 50 line 050"),
+            "cursor row shows its absolute number"
+        );
+        assert!(plain.contains("  1 line 049"), "row above shows distance 1");
+        assert!(plain.contains("  1 line 051"), "row below shows distance 1");
+        assert!(!plain.contains(" 49 line 050"), "stale mirror symptom");
+    }
+
+    #[test]
+    fn z_enter_moves_the_pane_cursor_column_too() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("    a\n    b\n");
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, key('$'));
+        handle_key(&mut editor, key('z'));
+        handle_key(
+            &mut editor,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!((editor.cursor.line, editor.cursor.col), (1, 4));
+        assert_eq!(
+            editor.panes()[editor.active_pane_idx()].cursor,
+            editor.cursor
+        );
     }
 
     // `:new`/`:touch` on a path that already exists must open it (Vim's

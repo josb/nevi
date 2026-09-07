@@ -9,14 +9,14 @@ the test suite enforces, so it cannot drift from what is actually verified.
 
 ## Summary
 
-- **364 keybinds implemented** ([KEYBINDINGS.md](KEYBINDINGS.md)), **63 planned** ([KEYBINDS_ROADMAP.md](KEYBINDS_ROADMAP.md))
-- **202 keybinds in the coverage inventory**, each mapped to the automated test that protects it:
-  - 188 verified against real Neovim (v0.11.3) by the Vim oracle
-  - 13 protected by focused Nevi regression tests
+- **370 keybinds implemented** ([KEYBINDINGS.md](KEYBINDINGS.md)), **57 planned** ([KEYBINDS_ROADMAP.md](KEYBINDS_ROADMAP.md))
+- **211 keybinds in the coverage inventory**, each mapped to the automated test that protects it:
+  - 192 verified against real Neovim (v0.11.3) by the Vim oracle
+  - 18 protected by focused Nevi regression tests
   - 1 covered as default-keymap plumbing with dedicated tests
-- **564 oracle cases**: motions (144), editing (173), increment (31), insert-entry (17), marks (45), open-line (20), replace (27), search (51), text-objects (30), undo-redo (2), visual (24)
+- **580 oracle cases**: motions (160), editing (173), increment (31), insert-entry (17), marks (45), open-line (20), replace (27), search (51), text-objects (30), undo-redo (2), visual (24)
 - **0 tracked coverage gaps**
-- **247 of 454 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
+- **251 of 458 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
 
 ## How the Vim oracle works
 
@@ -214,6 +214,10 @@ claim protection.
 | `zz` | Center cursor line | `center cursor line` |
 | `zt` | Move cursor line to top | `cursor line to top` |
 | `zb` | Move cursor line to bottom | `cursor line to bottom` |
+| `z<CR>` | Cursor line to top, cursor to first non-blank | `z enter puts line at top and goes to first non-blank` |
+| `z.` | Center cursor line, cursor to first non-blank | `z dot centers line and goes to first non-blank` |
+| `z-` | Cursor line to bottom, cursor to first non-blank | `z minus puts line at bottom and goes to first non-blank` |
+| `zl` | Scroll the view right, count columns | `zl drags the cursor to the new left edge` |
 | `/` | Search forward | `search forward lands on match start` |
 | `?` | Search backward | `search backward lands on previous match` |
 | `n` | Go to next match | `next match` |
@@ -242,6 +246,11 @@ Nevi-owned behavior with no Vim equivalent to compare against.
 | `[M` | Move to previous method/function end (tree-sitter) | `method_motion_ends_land_on_closing_brace` |
 | `=` | Re-indent selected lines | `visual_equals_reindents_selection_like_double_equals` |
 | `<leader>j` | Start labeled jump navigation | `labeled_jump_jumps_to_selected_visible_match` |
+| `zh` | Scroll the view left, count columns | `scroll_columns_left_pulls_a_cursor_past_the_right_edge_back_in` |
+| `zL` | Scroll the view right half a screen | `half_screen_column_scroll_uses_half_the_text_width` |
+| `zH` | Scroll the view left half a screen | `half_screen_column_scroll_uses_half_the_text_width` |
+| `zs` | Scroll so the cursor is at the left edge | `zs_and_ze_put_the_cursor_at_the_screen_edges` |
+| `ze` | Scroll so the cursor is at the right edge | `zs_and_ze_put_the_cursor_at_the_screen_edges` |
 | `1-9 (start screen)` | Open the numbered start screen entry | `dashboard_digit_opens_numbered_entry_via_key` |
 | `h1-h9 (start screen)` | Jump to the numbered harpoon slot from the start screen | `dashboard_h_digit_opens_harpoon_slot` |
 

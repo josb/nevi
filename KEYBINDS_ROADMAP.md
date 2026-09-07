@@ -4,7 +4,7 @@ Nevi aims for full vim/neovim keybind compatibility. Defaults follow Neovim, and
 keybinds are configurable — sensible defaults out of the box, overridable to your
 own taste.
 
-**Status: 364 keybinds implemented, 63 planned Vim/Neovim parity defaults.**
+**Status: 370 keybinds implemented, 57 planned Vim/Neovim parity defaults.**
 
 This file tracks what's **planned** (not yet implemented). For the full list of
 keybinds that already work, see [KEYBINDINGS.md](KEYBINDINGS.md). This list comes
@@ -45,17 +45,6 @@ the larger areas, folds and quickfix before tabs and tags.
 | `gww` | Format the current line, keeping the cursor position |
 | `&` | Repeat the last `:s` substitution on the current line |
 | `g&` | Repeat the last `:s` on all lines with the same flags |
-
-### Scrolling
-
-| Keybind | Planned behavior |
-|---------|------------------|
-| `z<CR>` | Like `zt`, and move the cursor to the first non-blank |
-| `z.` | Like `zz`, and move the cursor to the first non-blank |
-| `z-` | Like `zb`, and move the cursor to the first non-blank |
-| `zh` / `zl` | Scroll the view one column left / right (no wrap) |
-| `zH` / `zL` | Scroll the view half a screen left / right |
-| `zs` / `ze` | Scroll so the cursor is at the start / end of the screen |
 
 ### Command-Line Mode Defaults
 
