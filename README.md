@@ -272,6 +272,9 @@ A template config file is created automatically on first run. Here's an example:
 tab_width = 2
 format_on_save = true
 relative_numbers = true
+# Git/diagnostic gutter: "auto" (only while a sign exists, like nvim), "yes", "no".
+# `:set signcolumn=auto` switches it at runtime.
+sign_column = "yes"
 scroll_off = 8
 # Wheel scrolls the buffer, clicks move the cursor (like nvim's mouse=nvi).
 # Set to false to leave the mouse to the terminal; at runtime `:set nomouse`
