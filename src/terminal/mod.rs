@@ -10579,6 +10579,7 @@ fn execute_command(editor: &mut Editor, cmd: Command) {
                 match value.as_deref().and_then(crate::config::SignColumn::parse) {
                     Some(mode) => {
                         editor.settings.editor.sign_column = mode;
+                        editor.sign_column_width_changed();
                         CommandResult::Ok
                     }
                     None => {
@@ -11732,6 +11733,168 @@ mod tests {
             row.starts_with(&format!(" {error_glyph}  1 123 ")),
             "yes with line numbers: sign cells, number, separator, text; row={row:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Row and column of the last `CSI row;col H` in the stream, which is
+    /// where `position_cursor` leaves the terminal cursor.
+    fn final_cursor_cell(rendered: &str) -> (usize, usize) {
+        let mut last = (0, 0);
+        for (start, _) in rendered.match_indices("\x1b[") {
+            let body = &rendered[start + 2..];
+            let Some(end) = body.find(|c: char| ('@'..='~').contains(&c)) else {
+                continue;
+            };
+            if &body[end..end + 1] == "H" {
+                let mut parts = body[..end]
+                    .split(';')
+                    .map(|n| n.parse::<usize>().unwrap_or(1));
+                last = (
+                    parts.next().unwrap_or(1).saturating_sub(1),
+                    parts.next().unwrap_or(1).saturating_sub(1),
+                );
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn cursor_cell_follows_the_sign_column_width() {
+        use crate::config::SignColumn;
+        let mut editor = Editor::default();
+        editor.set_size(30, 6);
+        editor.settings.editor.line_numbers = false;
+        editor.replace_buffer_content("123\n");
+        editor.cursor.col = 1;
+
+        assert_eq!(final_cursor_cell(&render_editor_to_string(&editor)), (0, 3));
+        editor.settings.editor.sign_column = SignColumn::Auto;
+        assert_eq!(final_cursor_cell(&render_editor_to_string(&editor)), (0, 1));
+        editor.settings.editor.line_numbers = true;
+        assert_eq!(
+            final_cursor_cell(&render_editor_to_string(&editor)),
+            (0, 3 + 1 + 1)
+        );
+    }
+
+    /// Enabling the gutter shrinks the text area by two cells. The scroll
+    /// offsets were computed against the old width, so without a rescroll a
+    /// cursor on the last visible column is drawn outside the pane.
+    #[test]
+    fn set_signcolumn_rescrolls_so_the_cursor_stays_inside_the_pane() {
+        use crate::config::SignColumn;
+        let mut editor = Editor::default();
+        editor.set_size(30, 6);
+        editor.update_pane_rects();
+        editor.settings.editor.line_numbers = false;
+        editor.settings.editor.scroll_off = 0;
+        editor.settings.editor.sign_column = SignColumn::No;
+        editor.replace_buffer_content(&format!("{}\n", "x".repeat(60)));
+        editor.cursor.col = 40;
+        editor.scroll_to_cursor();
+        assert_eq!(
+            editor.h_offset, 11,
+            "40 - 30 + 1: cursor on the last of 30 columns"
+        );
+        assert_eq!(
+            final_cursor_cell(&render_editor_to_string(&editor)),
+            (0, 29)
+        );
+
+        execute_command(
+            &mut editor,
+            Command::Set("signcolumn".to_string(), Some("yes".to_string())),
+        );
+
+        assert_eq!(
+            editor.h_offset, 13,
+            "rescrolled for the 28-column text area"
+        );
+        assert_eq!(
+            final_cursor_cell(&render_editor_to_string(&editor)),
+            (0, 29)
+        );
+    }
+
+    #[test]
+    fn set_signcolumn_rescrolls_wrapped_view_after_reflow() {
+        use crate::config::SignColumn;
+        let mut editor = Editor::default();
+        editor.set_size(20, 6); // 4 text rows
+        editor.update_pane_rects();
+        editor.settings.editor.line_numbers = false;
+        editor.settings.editor.scroll_off = 0;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 9999;
+        editor.settings.editor.sign_column = SignColumn::No;
+        // Line 0 takes 3 rows at width 20 and 4 rows at width 18.
+        editor.replace_buffer_content(&format!("{}\nsecond\n", "a".repeat(56)));
+        editor.cursor.line = 1;
+        editor.scroll_to_cursor();
+        assert_eq!(editor.viewport_offset, 0);
+        assert_eq!(final_cursor_cell(&render_editor_to_string(&editor)), (3, 0));
+
+        execute_command(
+            &mut editor,
+            Command::Set("signcolumn".to_string(), Some("yes".to_string())),
+        );
+
+        let (row, col) = final_cursor_cell(&render_editor_to_string(&editor));
+        assert!(row < 4, "cursor row {row} must stay inside the 4 text rows");
+        assert_eq!(col, 2, "text starts after the 2-cell gutter");
+        assert_eq!(
+            editor.viewport_offset, 1,
+            "view scrolled so line 1 is visible"
+        );
+    }
+
+    #[test]
+    fn gutter_git_markers_render_in_the_first_sign_cell() {
+        use crate::git::{GitDiff, GitHunk, GitLineStatus};
+        let tmp = std::env::temp_dir().join(format!("nevi_git_gutter_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+        let path = tmp.join("g.rs");
+        std::fs::write(&path, "one\ntwo\nthree\n").expect("write file");
+
+        let mut editor = Editor::default();
+        editor.set_size(30, 6);
+        editor.settings.editor.line_numbers = false;
+        editor.open_file(path).expect("open file");
+        let key = editor
+            .buffer()
+            .path
+            .as_ref()
+            .expect("path")
+            .to_string_lossy()
+            .to_string();
+        editor.set_git_diff(
+            key,
+            GitDiff {
+                hunks: vec![
+                    GitHunk {
+                        line: 0,
+                        status: GitLineStatus::Added,
+                    },
+                    GitHunk {
+                        line: 1,
+                        status: GitLineStatus::Modified,
+                    },
+                    GitHunk {
+                        line: 2,
+                        status: GitLineStatus::Deleted,
+                    },
+                ],
+            },
+        );
+
+        let rendered = render_editor_to_string(&editor);
+        assert_eq!(screen_row_text(&rendered, 0), "▎ one");
+        assert_eq!(screen_row_text(&rendered, 1), "▎ two");
+        assert_eq!(screen_row_text(&rendered, 2), "▁ three");
+
+        editor.settings.editor.sign_column = crate::config::SignColumn::No;
+        assert_eq!(screen_row_text(&render_editor_to_string(&editor), 0), "one");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
