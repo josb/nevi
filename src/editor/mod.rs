@@ -1010,6 +1010,10 @@ struct GitStatusScan {
     scan_duration: Duration,
 }
 
+/// Sign column width in cells when shown: one for the git marker, one for
+/// the diagnostic glyph. See `Editor::sign_column_width`.
+const SIGN_COLUMN_WIDTH: usize = 2;
+
 pub struct Editor {
     /// All open buffers
     buffers: Vec<Buffer>,
@@ -4652,24 +4656,61 @@ impl Editor {
         self.pane_text_area_width(self.active_pane)
     }
 
-    /// Text area width for an arbitrary pane (its rect minus sign column,
-    /// line numbers, and separator).
+    /// Text area width for an arbitrary pane (its rect minus the gutter).
     fn pane_text_area_width(&self, pane_idx: usize) -> usize {
-        let (pane_width, buffer) = if pane_idx < self.panes.len() {
+        let (pane_width, buffer_idx) = if pane_idx < self.panes.len() {
             (
                 self.panes[pane_idx].rect.width as usize,
-                &self.buffers[self.panes[pane_idx].buffer_idx],
+                self.panes[pane_idx].buffer_idx,
             )
         } else {
-            (self.term_width as usize, self.buffer())
+            (self.term_width as usize, self.current_buffer_idx)
         };
-        const SIGN_COLUMN_WIDTH: usize = 2;
-        let line_num_width = buffer.addressable_line_count().to_string().len().max(3);
-        if self.settings.editor.line_numbers {
-            pane_width.saturating_sub(SIGN_COLUMN_WIDTH + line_num_width + 1)
-        } else {
-            pane_width.saturating_sub(SIGN_COLUMN_WIDTH)
+        pane_width.saturating_sub(self.gutter_width(buffer_idx))
+    }
+
+    /// Cells the sign column takes for `buffer_idx`: 2 (git marker, then
+    /// diagnostic glyph) or 0, per `[editor] sign_column`. Mirrors nvim's
+    /// `signcolumn`: `yes` always reserves it so text never shifts, `no`
+    /// never draws it, `auto` shows it only while the buffer has a sign.
+    /// Decided per buffer, not per pane, so a split never changes it.
+    pub fn sign_column_width(&self, buffer_idx: usize) -> usize {
+        use crate::config::SignColumn;
+        match self.settings.editor.sign_column {
+            SignColumn::Yes => SIGN_COLUMN_WIDTH,
+            SignColumn::No => 0,
+            SignColumn::Auto if self.buffer_has_signs(buffer_idx) => SIGN_COLUMN_WIDTH,
+            SignColumn::Auto => 0,
         }
+    }
+
+    fn buffer_has_signs(&self, buffer_idx: usize) -> bool {
+        let Some(path) = self.buffers.get(buffer_idx).and_then(|b| b.path.as_ref()) else {
+            return false;
+        };
+        let has_git_hunk = self
+            .git_diffs
+            .get(&path.to_string_lossy().to_string())
+            .is_some_and(|diff| !diff.hunks.is_empty());
+        has_git_hunk
+            || self
+                .diagnostics
+                .get(&crate::lsp::path_to_uri(path))
+                .is_some_and(|diags| !diags.is_empty())
+    }
+
+    /// Pane-relative column where buffer text starts: the sign column plus,
+    /// when line numbers are on, the number width and its separator space.
+    /// Every gutter/text boundary (render fill, cursor placement, popup
+    /// anchors, mouse hit-testing) must go through this so they agree.
+    pub fn gutter_width(&self, buffer_idx: usize) -> usize {
+        let mut width = self.sign_column_width(buffer_idx);
+        if self.settings.editor.line_numbers {
+            if let Some(buffer) = self.buffers.get(buffer_idx) {
+                width += buffer.addressable_line_count().to_string().len().max(3) + 1;
+            }
+        }
+        width
     }
 
     fn effective_wrap_width(&self) -> usize {
@@ -12895,6 +12936,62 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sign_column_width_follows_setting_and_buffer_signs() {
+        use crate::config::SignColumn;
+        let mut editor = Editor::default();
+        editor.set_size(80, 12);
+        editor.replace_buffer_content("123\n");
+        let path = PathBuf::from("/nevi-tests/sign-column.rs");
+        editor.buffer_mut().path = Some(path.clone());
+
+        // yes: reserved even with nothing to show (today's behavior, the default)
+        assert_eq!(editor.sign_column_width(0), 2);
+        assert_eq!(editor.gutter_width(0), 2 + 3 + 1);
+
+        editor.settings.editor.sign_column = SignColumn::Auto;
+        assert_eq!(editor.sign_column_width(0), 0, "auto with no signs");
+        editor.settings.editor.line_numbers = false;
+        assert_eq!(editor.gutter_width(0), 0, "issue #330: text flush left");
+        assert_eq!(editor.pane_text_area_width(0), 80);
+
+        editor.set_git_diff(
+            path.to_string_lossy().to_string(),
+            crate::git::GitDiff {
+                hunks: vec![crate::git::GitHunk {
+                    line: 0,
+                    status: crate::git::GitLineStatus::Modified,
+                }],
+            },
+        );
+        assert_eq!(editor.sign_column_width(0), 2, "auto with a git hunk");
+        assert_eq!(editor.pane_text_area_width(0), 78);
+
+        editor.set_git_diff(path.to_string_lossy().to_string(), Default::default());
+        assert_eq!(editor.sign_column_width(0), 0, "auto after hunks clear");
+        editor.set_diagnostics(
+            crate::lsp::path_to_uri(&path),
+            vec![crate::lsp::Diagnostic {
+                line: 0,
+                end_line: 0,
+                col_start: 0,
+                col_end: 1,
+                severity: crate::lsp::DiagnosticSeverity::Warning,
+                message: "w".to_string(),
+                source: None,
+                code: None,
+            }],
+        );
+        assert_eq!(editor.sign_column_width(0), 2, "auto with a diagnostic");
+
+        editor.settings.editor.sign_column = SignColumn::No;
+        assert_eq!(
+            editor.sign_column_width(0),
+            0,
+            "no hides it even with signs"
+        );
     }
 
     #[test]
