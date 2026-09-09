@@ -2963,6 +2963,131 @@ impl Terminal {
         Ok(())
     }
 
+    /// Screen cell (x, y) of buffer position (`line`, `col`) in the active
+    /// pane, computed the way the terminal cursor is placed: pane origin,
+    /// gutter, horizontal offset, and with wrap on, every wrapped row above
+    /// plus the offset inside the wrapped row (continuation indent included).
+    /// Anything anchored to the cursor, the cursor itself and every popup,
+    /// must come through here; `line - viewport_offset` is wrong under wrap.
+    fn screen_cell_for(editor: &Editor, line: usize, col: usize) -> (u16, u16) {
+        let active_pane = &editor.panes()[editor.active_pane_idx()];
+        let gutter_width = editor.gutter_width(active_pane.buffer_idx);
+        let wrap_enabled = editor.settings.editor.wrap;
+        let wrap_width = editor.settings.editor.wrap_width;
+        let tab_width = editor.get_effective_tab_width();
+
+        let (cursor_row, cursor_col) = if wrap_enabled {
+            // Calculate visual position with wrapping
+            let buffer = editor.buffer();
+            let text_area_width = (active_pane.rect.width as usize).saturating_sub(gutter_width);
+            let effective_wrap_width = wrap_width.min(text_area_width);
+
+            // Count visual rows from viewport_offset to cursor line
+            let mut visual_row = 0;
+            for line_idx in active_pane.viewport_offset..line {
+                if line_idx < buffer.len_lines() {
+                    let line_content = buffer
+                        .line(line_idx)
+                        .map(|l| l.to_string())
+                        .unwrap_or_default();
+                    let segments = calculate_wrap_segments(
+                        &line_content,
+                        effective_wrap_width,
+                        true,
+                        tab_width,
+                    );
+                    if line_idx == active_pane.viewport_offset {
+                        visual_row += segments.len().saturating_sub(active_pane.h_offset);
+                    } else {
+                        visual_row += segments.len();
+                    }
+                }
+            }
+
+            // Now find which segment of the cursor line contains the cursor column
+            let cursor_line_content = buffer.line(line).map(|l| l.to_string()).unwrap_or_default();
+            let segments = calculate_wrap_segments(
+                &cursor_line_content,
+                effective_wrap_width,
+                true,
+                tab_width,
+            );
+
+            let mut cursor_visual_row = visual_row;
+            let mut cursor_visual_col = col;
+
+            for (seg_idx, segment) in segments.iter().enumerate() {
+                let segment_end = if seg_idx + 1 < segments.len() {
+                    segments[seg_idx + 1].start_col
+                } else {
+                    cursor_line_content.chars().count()
+                };
+
+                if col >= segment.start_col && col < segment_end {
+                    // Cursor is in this segment
+                    cursor_visual_col = display_width_between_char_cols(
+                        &cursor_line_content,
+                        segment.start_col,
+                        col,
+                        tab_width,
+                    );
+                    // Add indentation offset for wrapped lines
+                    if !segment.is_first {
+                        let indent_len = cursor_line_content
+                            .chars()
+                            .take_while(|c| c.is_whitespace())
+                            .map(|c| editor_char_display_width(c, tab_width))
+                            .sum::<usize>();
+                        cursor_visual_col += indent_len;
+                    }
+                    break;
+                }
+                cursor_visual_row += 1;
+            }
+
+            if line == active_pane.viewport_offset {
+                cursor_visual_row = cursor_visual_row.saturating_sub(active_pane.h_offset);
+            }
+
+            // Handle cursor at end of line
+            if col >= cursor_line_content.trim_end_matches('\n').chars().count() {
+                cursor_visual_row = visual_row + segments.len().saturating_sub(1);
+                let last_segment = segments.last().unwrap();
+                cursor_visual_col =
+                    text_display_width(last_segment.text.trim_end_matches('\n'), tab_width);
+                if line == active_pane.viewport_offset {
+                    cursor_visual_row = cursor_visual_row.saturating_sub(active_pane.h_offset);
+                }
+            }
+
+            let col = gutter_width + cursor_visual_col;
+
+            (cursor_visual_row, col)
+        } else {
+            // No wrap: one buffer line per row, column adjusted for horizontal scroll
+            let cursor_row = line.saturating_sub(active_pane.viewport_offset);
+            let display_col = editor
+                .buffer()
+                .line(line)
+                .map(|line| {
+                    display_width_between_rope_char_cols(line, active_pane.h_offset, col, tab_width)
+                })
+                .unwrap_or(0);
+            let cursor_col = gutter_width + display_col;
+            (cursor_row, cursor_col)
+        };
+
+        // Account for pane position
+        (
+            (active_pane.rect.x as usize + cursor_col) as u16,
+            (active_pane.rect.y as usize + cursor_row) as u16,
+        )
+    }
+
+    fn cursor_screen_cell(editor: &Editor) -> (u16, u16) {
+        Self::screen_cell_for(editor, editor.cursor.line, editor.cursor.col)
+    }
+
     /// Position the cursor based on editor mode
     fn position_cursor(&mut self, editor: &Editor) -> anyhow::Result<()> {
         match editor.mode {
@@ -3048,138 +3173,10 @@ impl Terminal {
                 }
             }
             _ => {
-                // Cursor in active pane's buffer
-                let active_pane = &editor.panes()[editor.active_pane_idx()];
-                let gutter_width = editor.gutter_width(active_pane.buffer_idx);
-                let wrap_enabled = editor.settings.editor.wrap;
-                let wrap_width = editor.settings.editor.wrap_width;
-                let tab_width = editor.get_effective_tab_width();
-
-                let (cursor_row, cursor_col) = if wrap_enabled {
-                    // Calculate visual position with wrapping
-                    let buffer = editor.buffer();
-                    let text_area_width =
-                        (active_pane.rect.width as usize).saturating_sub(gutter_width);
-                    let effective_wrap_width = wrap_width.min(text_area_width);
-
-                    // Count visual rows from viewport_offset to cursor line
-                    let mut visual_row = 0;
-                    for line_idx in active_pane.viewport_offset..editor.cursor.line {
-                        if line_idx < buffer.len_lines() {
-                            let line_content = buffer
-                                .line(line_idx)
-                                .map(|l| l.to_string())
-                                .unwrap_or_default();
-                            let segments = calculate_wrap_segments(
-                                &line_content,
-                                effective_wrap_width,
-                                true,
-                                tab_width,
-                            );
-                            if line_idx == active_pane.viewport_offset {
-                                visual_row += segments.len().saturating_sub(active_pane.h_offset);
-                            } else {
-                                visual_row += segments.len();
-                            }
-                        }
-                    }
-
-                    // Now find which segment of the cursor line contains the cursor column
-                    let cursor_line_content = buffer
-                        .line(editor.cursor.line)
-                        .map(|l| l.to_string())
-                        .unwrap_or_default();
-                    let segments = calculate_wrap_segments(
-                        &cursor_line_content,
-                        effective_wrap_width,
-                        true,
-                        tab_width,
-                    );
-
-                    let mut cursor_visual_row = visual_row;
-                    let mut cursor_visual_col = editor.cursor.col;
-
-                    for (seg_idx, segment) in segments.iter().enumerate() {
-                        let segment_end = if seg_idx + 1 < segments.len() {
-                            segments[seg_idx + 1].start_col
-                        } else {
-                            cursor_line_content.chars().count()
-                        };
-
-                        if editor.cursor.col >= segment.start_col && editor.cursor.col < segment_end
-                        {
-                            // Cursor is in this segment
-                            cursor_visual_col = display_width_between_char_cols(
-                                &cursor_line_content,
-                                segment.start_col,
-                                editor.cursor.col,
-                                tab_width,
-                            );
-                            // Add indentation offset for wrapped lines
-                            if !segment.is_first {
-                                let indent_len = cursor_line_content
-                                    .chars()
-                                    .take_while(|c| c.is_whitespace())
-                                    .map(|c| editor_char_display_width(c, tab_width))
-                                    .sum::<usize>();
-                                cursor_visual_col += indent_len;
-                            }
-                            break;
-                        }
-                        cursor_visual_row += 1;
-                    }
-
-                    if editor.cursor.line == active_pane.viewport_offset {
-                        cursor_visual_row = cursor_visual_row.saturating_sub(active_pane.h_offset);
-                    }
-
-                    // Handle cursor at end of line
-                    if editor.cursor.col
-                        >= cursor_line_content.trim_end_matches('\n').chars().count()
-                    {
-                        cursor_visual_row = visual_row + segments.len().saturating_sub(1);
-                        let last_segment = segments.last().unwrap();
-                        cursor_visual_col =
-                            text_display_width(last_segment.text.trim_end_matches('\n'), tab_width);
-                        if editor.cursor.line == active_pane.viewport_offset {
-                            cursor_visual_row =
-                                cursor_visual_row.saturating_sub(active_pane.h_offset);
-                        }
-                    }
-
-                    let col = gutter_width + cursor_visual_col;
-
-                    (cursor_visual_row, col)
-                } else {
-                    // Original non-wrapped calculation
-                    let cursor_row = editor
-                        .cursor
-                        .line
-                        .saturating_sub(active_pane.viewport_offset);
-                    // Sign column (2) + line numbers + cursor position (adjusted for horizontal scroll)
-                    let display_col = editor
-                        .buffer()
-                        .line(editor.cursor.line)
-                        .map(|line| {
-                            display_width_between_rope_char_cols(
-                                line,
-                                active_pane.h_offset,
-                                editor.cursor.col,
-                                tab_width,
-                            )
-                        })
-                        .unwrap_or(0);
-                    let cursor_col = gutter_width + display_col;
-                    (cursor_row, cursor_col)
-                };
-
-                // Account for pane position
-                let screen_x = active_pane.rect.x as usize + cursor_col;
-                let screen_y = active_pane.rect.y as usize + cursor_row;
-
+                let (screen_x, screen_y) = Self::cursor_screen_cell(editor);
                 execute!(
                     self.stdout,
-                    cursor::MoveTo(screen_x as u16, screen_y as u16),
+                    cursor::MoveTo(screen_x, screen_y),
                     cursor::Show
                 )?;
 
@@ -3625,20 +3622,9 @@ impl Terminal {
         // Calculate popup position (below cursor, or above if near bottom)
         // Position at trigger_col (start of word), not current cursor position
         // Account for active pane's position on screen
-        let active_pane = &editor.panes()[editor.active_pane_idx()];
-        let pane_x = active_pane.rect.x;
-        let pane_y = active_pane.rect.y;
-
-        let cursor_in_pane_col =
-            (editor.gutter_width(active_pane.buffer_idx) + completion.trigger_col) as u16;
-        let cursor_in_pane_row = (editor
-            .cursor
-            .line
-            .saturating_sub(active_pane.viewport_offset)) as u16;
-
-        // Convert to screen coordinates
-        let popup_screen_col = pane_x + cursor_in_pane_col;
-        let cursor_screen_row = pane_y + cursor_in_pane_row;
+        let (popup_screen_col, _) =
+            Self::screen_cell_for(editor, editor.cursor.line, completion.trigger_col);
+        let (_, cursor_screen_row) = Self::cursor_screen_cell(editor);
 
         // Calculate widths for label and detail columns (only from filtered items)
         let max_label_len = completion
@@ -4083,17 +4069,7 @@ impl Terminal {
 
         // Calculate popup position (above cursor if possible)
         // Account for active pane's position on screen
-        let active_pane = &editor.panes()[editor.active_pane_idx()];
-        let pane_x = active_pane.rect.x;
-        let pane_y = active_pane.rect.y;
-
-        let cursor_in_pane_col =
-            (editor.gutter_width(active_pane.buffer_idx) + editor.cursor.col) as u16;
-        let cursor_in_pane_row = (editor.cursor.line - editor.viewport_offset) as u16;
-
-        // Convert to screen coordinates
-        let cursor_screen_col = pane_x + cursor_in_pane_col;
-        let cursor_screen_row = pane_y + cursor_in_pane_row;
+        let (cursor_screen_col, cursor_screen_row) = Self::cursor_screen_cell(editor);
 
         let popup_y = if cursor_screen_row >= popup_height + 1 {
             cursor_screen_row - popup_height
@@ -4324,10 +4300,7 @@ impl Terminal {
         let signature = &help.signatures[active_idx];
 
         // Anchor to the cursor's screen cell (pane offset + gutter + column)
-        let cursor_screen_col = Self::text_area_x(editor) + editor.cursor.col as u16;
-        let active_pane = &editor.panes()[editor.active_pane_idx()];
-        let cursor_screen_row =
-            active_pane.rect.y + editor.cursor.line.saturating_sub(editor.viewport_offset) as u16;
+        let (cursor_screen_col, cursor_screen_row) = Self::cursor_screen_cell(editor);
 
         // Calculate dimensions based on signature
         let popup_width = (signature.label.chars().count() + 4).min(80).max(30) as u16;
@@ -4485,11 +4458,7 @@ impl Terminal {
         popup_height: u16,
     ) -> (u16, u16) {
         let active_pane = &editor.panes()[editor.active_pane_idx()];
-        let cursor_row = (editor
-            .cursor
-            .line
-            .saturating_sub(active_pane.viewport_offset)) as u16;
-        let cursor_screen_row = active_pane.rect.y.saturating_add(cursor_row);
+        let (cursor_screen_col, cursor_screen_row) = Self::cursor_screen_cell(editor);
 
         let popup_y = if cursor_screen_row
             .saturating_add(1)
@@ -4508,8 +4477,6 @@ impl Terminal {
         };
 
         let text_area_x = Self::text_area_x(editor);
-        let cursor_col = editor.cursor.col.saturating_sub(active_pane.h_offset) as u16;
-        let cursor_screen_col = text_area_x.saturating_add(cursor_col);
         let pane_right = active_pane.rect.x.saturating_add(active_pane.rect.width);
         let max_popup_x = pane_right.saturating_sub(popup_width).max(text_area_x);
         let popup_x = cursor_screen_col.min(max_popup_x).max(text_area_x);
@@ -5050,10 +5017,7 @@ impl Terminal {
         let popup_height = (picker.items.len() as u16 + 2).min(max_height);
 
         // Position near cursor
-        let cursor_screen_col = Self::text_area_x(editor) + editor.cursor.col as u16;
-        let active_pane = &editor.panes()[editor.active_pane_idx()];
-        let cursor_screen_row =
-            active_pane.rect.y + editor.cursor.line.saturating_sub(editor.viewport_offset) as u16;
+        let (cursor_screen_col, cursor_screen_row) = Self::cursor_screen_cell(editor);
 
         let popup_x = cursor_screen_col.min(editor.term_width.saturating_sub(popup_width + 2));
         let popup_y = if cursor_screen_row + popup_height + 1 < editor.term_height {
@@ -17056,6 +17020,110 @@ mod tests {
         handle_key(&mut editor, key('l'));
 
         assert!(editor.render_damage.requires_full_render());
+    }
+
+    /// Wrapped layout for the popup anchor tests (#333): line 0 takes two
+    /// rows at the 40-cell text width, so the cursor on line 1 sits on
+    /// screen row 2 even though it is only one buffer line down.
+    fn wrapped_popup_editor() -> Editor {
+        let mut editor = Editor::default();
+        editor.set_size(40, 12);
+        editor.settings.editor.line_numbers = false;
+        editor.settings.editor.sign_column = crate::config::SignColumn::No;
+        editor.settings.editor.scroll_off = 0;
+        editor.settings.editor.wrap = true;
+        editor.settings.editor.wrap_width = 9999;
+        editor.replace_buffer_content(&format!("{}\nsecond line\n", "a".repeat(70)));
+        editor.cursor.line = 1;
+        editor.cursor.col = 3;
+        editor
+    }
+
+    fn first_row_containing(rendered: &str, needle: char) -> Option<usize> {
+        (0..12).find(|&row| screen_row_text(rendered, row).contains(needle))
+    }
+
+    #[test]
+    fn screen_cell_for_counts_wrapped_rows_and_continuation_offsets() {
+        let mut editor = wrapped_popup_editor();
+        assert_eq!(Terminal::cursor_screen_cell(&editor), (3, 2));
+        // A position on line 0's second wrapped row: col 45 is 5 cells into row 1.
+        assert_eq!(Terminal::screen_cell_for(&editor, 0, 45), (5, 1));
+        // Same buffer, wrap off: plain line - viewport arithmetic again,
+        // for the cursor and for an arbitrary position.
+        editor.settings.editor.wrap = false;
+        assert_eq!(Terminal::cursor_screen_cell(&editor), (3, 1));
+        assert_eq!(Terminal::screen_cell_for(&editor, 0, 45), (45, 0));
+        // Splits offset by the pane origin (rects are laid out by the render
+        // loop, so refresh them here the way the mouse tests do).
+        editor.settings.editor.wrap = true;
+        editor.vsplit(None).expect("split");
+        editor.update_pane_rects();
+        // The new pane starts at (0, 0); put its cursor on line 1 col 3 too.
+        editor.cursor.line = 1;
+        editor.cursor.col = 3;
+        let pane = editor.panes()[editor.active_pane_idx()].rect;
+        assert!(pane.x > 0 && pane.width > 0);
+        let line0_rows = super::calculate_wrap_segments(
+            &"a".repeat(70),
+            pane.width as usize,
+            true,
+            editor.get_effective_tab_width(),
+        )
+        .len() as u16;
+        assert!(line0_rows >= 2);
+        assert_eq!(
+            Terminal::cursor_screen_cell(&editor),
+            (pane.x + 3, pane.y + line0_rows)
+        );
+    }
+
+    #[test]
+    fn diagnostic_float_position_accounts_for_wrapped_rows_above_cursor() {
+        let editor = wrapped_popup_editor();
+        assert_eq!(final_cursor_cell(&render_editor_to_string(&editor)), (2, 3));
+
+        let (popup_x, popup_y) = Terminal::diagnostic_float_position(&editor, 10, 3);
+
+        assert_eq!(
+            popup_y, 3,
+            "one row below the cursor's screen row, not its buffer row"
+        );
+        assert_eq!(popup_x, 3);
+    }
+
+    #[test]
+    fn completion_popup_sits_below_the_wrapped_cursor_row() {
+        let mut editor = wrapped_popup_editor();
+        editor.completion.active = true;
+        editor.completion.items = vec![completion_item("second_thing")];
+        editor.completion.filtered = vec![0];
+        editor.completion.selected = 0;
+        editor.completion.trigger_line = 1;
+        editor.completion.trigger_col = 0;
+
+        let rendered = render_editor_to_string(&editor);
+
+        // Below-cursor placement leaves one row gap: cursor row 2, border row 4.
+        assert_eq!(
+            first_row_containing(&rendered, '╭'),
+            Some(4),
+            "popup top border; rows={:?}",
+            (0..12)
+                .map(|r| screen_row_text(&rendered, r))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hover_popup_anchors_to_the_wrapped_cursor_row() {
+        let mut editor = wrapped_popup_editor();
+        editor.hover_content = Some("doc".to_string());
+
+        let rendered = render_editor_to_string(&editor);
+
+        // Not enough room above a 3-row box at screen row 2, so it opens on row 3.
+        assert_eq!(first_row_containing(&rendered, '╭'), Some(3));
     }
 
     #[test]
