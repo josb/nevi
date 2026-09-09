@@ -5117,11 +5117,22 @@ impl Editor {
         if let Some((start_line, start_col, end_line, mut end_col)) =
             self.motion_range(motion, count)
         {
+            // A linewise motion is dd over the covered lines; the cursor
+            // keeps its column like Neovim's nostartofline.
+            if Self::motion_is_linewise(motion) {
+                let original_col = self.cursor.col;
+                self.cursor.line = start_line;
+                self.delete_line(end_line - start_line + 1, register);
+                self.cursor.col = original_col;
+                self.clamp_cursor();
+                self.scroll_to_cursor();
+                return;
+            }
             // Neovim promotes a counted d$ from column zero to a linewise
             // deletion, including the target line's trailing newline.
             let counted_line_end_is_linewise =
                 motion == Motion::LineEnd && count > 1 && start_col == 0;
-            let linewise = Self::motion_is_linewise(motion) || counted_line_end_is_linewise;
+            let linewise = counted_line_end_is_linewise;
             if counted_line_end_is_linewise {
                 end_col = self.buffers[self.current_buffer_idx]
                     .line_len_including_newline(end_line)
@@ -5181,15 +5192,19 @@ impl Editor {
     /// Yank from cursor to motion target
     pub fn yank_motion(&mut self, motion: Motion, count: usize, register: Option<char>) {
         if let Some((start_line, start_col, end_line, end_col)) = self.motion_range(motion, count) {
+            // A linewise motion is yy over the covered lines; like Vim the
+            // cursor moves to the first of them (yk goes up) and keeps its
+            // column.
+            if Self::motion_is_linewise(motion) {
+                self.cursor.line = start_line;
+                self.yank_line(end_line - start_line + 1, register);
+                self.clamp_cursor();
+                self.scroll_to_cursor();
+                return;
+            }
             let text = self.get_range_text(start_line, start_col, end_line, end_col);
-            let linewise = Self::motion_is_linewise(motion);
-            let content = if linewise {
-                RegisterContent::Lines(text)
-            } else {
-                RegisterContent::Chars(text)
-            };
-            self.registers.yank(register, content);
-            self.set_yank_marks(start_line, start_col, end_line, end_col, linewise);
+            self.registers.yank(register, RegisterContent::Chars(text));
+            self.set_yank_marks(start_line, start_col, end_line, end_col, false);
             self.set_status("Yanked");
         }
     }
@@ -5232,7 +5247,13 @@ impl Editor {
         .or_else(|| self.motion_range(motion, count));
 
         if let Some((start_line, start_col, end_line, end_col)) = range {
-            let linewise = Self::motion_is_linewise(motion);
+            // A linewise motion is cc over the covered lines: they collapse
+            // to one line that keeps the first line's indent.
+            if Self::motion_is_linewise(motion) {
+                self.cursor.line = start_line;
+                self.change_line(end_line - start_line + 1, register);
+                return;
+            }
             let text = self.get_range_text(start_line, start_col, end_line, end_col);
 
             // Begin undo group (will include the delete and subsequent inserts)
@@ -5242,14 +5263,9 @@ impl Editor {
 
             let deleted = self.delete_range(start_line, start_col, end_line, end_col);
 
-            if linewise {
-                self.registers
-                    .delete(register, RegisterContent::Lines(deleted), false);
-            } else {
-                let is_small = !deleted.contains('\n');
-                self.registers
-                    .delete(register, RegisterContent::Chars(deleted), is_small);
-            }
+            let is_small = !deleted.contains('\n');
+            self.registers
+                .delete(register, RegisterContent::Chars(deleted), is_small);
 
             // Enter insert mode (don't start new undo group, reuse the one from change)
             self.enter_insert_mode_at_change(start_line, start_col);
@@ -10660,10 +10676,17 @@ impl Editor {
     /// Case transformation with motion (gu{motion}, gU{motion}, g~{motion})
     pub fn case_motion(&mut self, op: CaseOperator, motion: Motion, count: usize) {
         if let Some((start_line, start_col, end_line, end_col)) = self.motion_range(motion, count) {
+            let original_col = self.cursor.col;
             self.transform_case(start_line, start_col, end_line, end_col, op);
-            // Move cursor to start of range
+            // Move cursor to start of range; a linewise motion keeps the
+            // column (gUj leaves the cursor where it was).
             self.cursor.line = start_line;
-            self.cursor.col = start_col;
+            self.cursor.col = if Self::motion_is_linewise(motion) {
+                original_col
+            } else {
+                start_col
+            };
+            self.clamp_cursor();
         }
     }
 
@@ -11295,6 +11318,40 @@ impl Editor {
         self.scroll_to_cursor();
     }
 
+    /// Target line of H, M and L in the active window. M is the middle of
+    /// the lines actually shown, so a buffer shorter than the window
+    /// centres on its own lines like Vim. H and L stay inside 'scrolloff'
+    /// when moving, but an operator reaches the true top and bottom lines
+    /// (:h H: "unless an operator is pending").
+    fn screen_motion_target_line(
+        &self,
+        motion: Motion,
+        count: usize,
+        honour_scroll_off: bool,
+    ) -> usize {
+        let text_rows = self.active_pane_text_rows();
+        let top = self.viewport_offset;
+        let last = last_addressable_line(self.buffer());
+        let (safe_top, safe_bottom) = if honour_scroll_off {
+            self.screen_motion_safe_line_range()
+        } else {
+            (0, last)
+        };
+        match motion {
+            Motion::ScreenTop => top
+                .saturating_add(count.saturating_sub(1))
+                .clamp(safe_top, safe_bottom),
+            Motion::ScreenBottom => top
+                .saturating_add(text_rows.saturating_sub(1))
+                .saturating_sub(count.saturating_sub(1))
+                .clamp(safe_top, safe_bottom),
+            _ => {
+                let shown = text_rows.min(last.saturating_sub(top) + 1).max(1);
+                (top + (shown + 1) / 2 - 1).min(last)
+            }
+        }
+    }
+
     /// Repeat last change (. command)
 
     /// Apply motion with screen-relative awareness
@@ -11320,41 +11377,8 @@ impl Editor {
 
         // Handle screen-relative motions specially
         match motion {
-            Motion::ScreenTop => {
-                // H - move to top of visible screen (+ count lines from top)
-                let (safe_top, safe_bottom) = self.screen_motion_safe_line_range();
-                let target_line = self
-                    .viewport_offset
-                    .saturating_add(count.saturating_sub(1))
-                    .clamp(safe_top, safe_bottom);
-                self.cursor.line = target_line;
-                // Move to first non-blank
-                self.cursor.col = self.find_first_non_blank(self.cursor.line);
-                self.clamp_cursor();
-                self.scroll_to_cursor();
-            }
-            Motion::ScreenMiddle => {
-                // M - move to middle of visible screen
-                let text_rows = self.active_pane_text_rows();
-                let middle = text_rows.saturating_sub(1) / 2;
-                let target_line =
-                    (self.viewport_offset + middle).min(last_addressable_line(self.buffer()));
-                self.cursor.line = target_line;
-                // Move to first non-blank
-                self.cursor.col = self.find_first_non_blank(self.cursor.line);
-                self.clamp_cursor();
-                self.scroll_to_cursor();
-            }
-            Motion::ScreenBottom => {
-                // L - move to bottom of visible screen (- count lines from bottom)
-                let text_rows = self.active_pane_text_rows();
-                let (safe_top, safe_bottom) = self.screen_motion_safe_line_range();
-                let target_line = self
-                    .viewport_offset
-                    .saturating_add(text_rows.saturating_sub(1))
-                    .saturating_sub(count.saturating_sub(1))
-                    .clamp(safe_top, safe_bottom);
-                self.cursor.line = target_line;
+            Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom => {
+                self.cursor.line = self.screen_motion_target_line(motion, count, true);
                 // Move to first non-blank
                 self.cursor.col = self.find_first_non_blank(self.cursor.line);
                 self.clamp_cursor();
@@ -12534,10 +12558,21 @@ impl Editor {
         )
     }
 
+    /// Motions that cover whole lines under an operator (:h linewise):
+    /// `dj` deletes two lines, `yG` yanks to the end linewise.
     fn motion_is_linewise(motion: Motion) -> bool {
         matches!(
             motion,
-            Motion::NextLineFirstNonBlank | Motion::PrevLineFirstNonBlank
+            Motion::Up
+                | Motion::Down
+                | Motion::NextLineFirstNonBlank
+                | Motion::PrevLineFirstNonBlank
+                | Motion::FileStart
+                | Motion::FileEnd
+                | Motion::GotoLine(_)
+                | Motion::ScreenTop
+                | Motion::ScreenMiddle
+                | Motion::ScreenBottom
         )
     }
 
@@ -12569,6 +12604,16 @@ impl Editor {
             // Tree-sitter motions can't be computed by the pure
             // apply_motion; this keeps d]m / y[m / c]M working.
             self.method_motion_target(boundary, count)?
+        } else if matches!(
+            motion,
+            Motion::ScreenTop | Motion::ScreenMiddle | Motion::ScreenBottom
+        ) {
+            // The pure apply_motion has no viewport; resolve H, M and L
+            // here so dH, yM and cL cover the lines on screen.
+            (
+                self.screen_motion_target_line(motion, count, false),
+                self.cursor.col,
+            )
         } else {
             apply_motion(
                 &self.buffers[self.current_buffer_idx],
@@ -12581,7 +12626,18 @@ impl Editor {
         };
 
         if Self::motion_is_linewise(motion) {
-            if target_line == self.cursor.line {
+            // j, k, + and - fail when they cannot move, which cancels the
+            // operator (dj on the last line does nothing). G, gg, H, M and
+            // L still act on the line they land on (dG on the last line
+            // deletes it).
+            let fails_in_place = matches!(
+                motion,
+                Motion::Up
+                    | Motion::Down
+                    | Motion::NextLineFirstNonBlank
+                    | Motion::PrevLineFirstNonBlank
+            );
+            if fails_in_place && target_line == self.cursor.line {
                 return None;
             }
 
@@ -12774,6 +12830,7 @@ mod tests {
     mod editing_operators;
     mod file_lifecycle;
     mod insert_entry;
+    mod linewise_operators;
     mod macro_lens;
     mod open_line;
     mod replace;
