@@ -11,7 +11,7 @@ A fast, Neovim-inspired terminal editor written in Rust.
 
 ![Nevi demo — file explorer with git status and diagnostic badges, LSP hover and goto-definition, vim motions, live grep, and live theme switching](nevi-demo.gif)
 
-**370 keybinds implemented**, 204 of them verified against real Neovim on every
+**372 keybinds implemented**, 206 of them verified against real Neovim on every
 CI run. See the generated [parity scoreboard](PARITY.md).
 
 - [Why Nevi](#why-nevi)
@@ -38,7 +38,7 @@ built into the binary.
 | Neovim | Full | Via plugins | Powerful but plugin-dependent |
 | Zed | Partial | Yes | Fast but vim mode incomplete |
 | Helix | Kakoune-style | Yes | Different keybind philosophy |
-| **Nevi** | 370 and counting | Yes | Test-backed vim compatibility |
+| **Nevi** | 372 and counting | Yes | Test-backed vim compatibility |
 
 ## Features
 

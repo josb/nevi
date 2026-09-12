@@ -1050,6 +1050,20 @@ status = "implemented"
 vim_default = true
 
 [[normal.search]]
+key = "&"
+action = "repeat_substitute"
+desc = "Repeat the last :s on the current line with its flags"
+status = "implemented"
+vim_default = true
+
+[[normal.search]]
+key = "g&"
+action = "repeat_substitute_all"
+desc = "Repeat the last :s on every line with its flags"
+status = "implemented"
+vim_default = true
+
+[[normal.search]]
 key = "gN"
 action = "search_and_select_backward"
 desc = "Search backward and select match"

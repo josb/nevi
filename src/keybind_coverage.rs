@@ -802,6 +802,16 @@ const KEYBIND_COVERAGE: &[KeybindCoverage] = &[
         "gn selects next match from outside",
     ),
     vim_oracle(
+        "&",
+        "Repeat the last :s on the current line",
+        "ampersand repeats the last substitute on the current line",
+    ),
+    vim_oracle(
+        "g&",
+        "Repeat the last :s on every line with its flags",
+        "g ampersand repeats on every line with the flags",
+    ),
+    vim_oracle(
         "gN",
         "Search backward and select match",
         "gN selects match backward",

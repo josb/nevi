@@ -157,6 +157,10 @@ pub enum KeyAction {
     JoinLines(usize),
     /// Join lines without space (gJ)
     JoinLinesNoSpace(usize),
+    /// &: repeat the last `:s` on the cursor line, count lines, no flags
+    RepeatSubstitute(usize),
+    /// g&: repeat the last `:s` on every line with its flags
+    RepeatSubstituteAll,
     /// Scroll cursor line to the center (zz, z.). The count first goes to
     /// that line; the flag also moves to the first non-blank (z.).
     ScrollCenter(Option<usize>, bool),
@@ -1208,6 +1212,11 @@ impl InputState {
                 self.reset();
                 KeyAction::ToggleCaseChars(count)
             }
+            (KeyModifiers::SHIFT, KeyCode::Char('&'))
+            | (KeyModifiers::NONE, KeyCode::Char('&')) => {
+                self.reset();
+                KeyAction::RepeatSubstitute(count)
+            }
             (KeyModifiers::NONE, KeyCode::Char('z')) => {
                 // z prefix for scroll commands (zz, zt, zb)
                 self.partial_key = Some('z');
@@ -1551,6 +1560,11 @@ impl InputState {
             ('g', KeyModifiers::SHIFT, KeyCode::Char('J')) => {
                 self.reset();
                 KeyAction::JoinLinesNoSpace(count)
+            }
+            ('g', KeyModifiers::SHIFT, KeyCode::Char('&'))
+            | ('g', KeyModifiers::NONE, KeyCode::Char('&')) => {
+                self.reset();
+                KeyAction::RepeatSubstituteAll
             }
             // g; - go to older change position
             ('g', KeyModifiers::NONE, KeyCode::Char(';')) => {
@@ -2609,6 +2623,15 @@ mod tests {
         assert_page_motion(&[key('2'), ctrl('f')], Motion::PageDown, Some(2));
         assert_page_motion(&[key('1'), ctrl('d')], Motion::HalfPageDown, Some(1));
 
+        assert!(matches!(run(&[key('&')]), KeyAction::RepeatSubstitute(1)));
+        assert!(matches!(
+            run(&[key('3'), shift('&')]),
+            KeyAction::RepeatSubstitute(3)
+        ));
+        assert!(matches!(
+            run(&[key('g'), key('&')]),
+            KeyAction::RepeatSubstituteAll
+        ));
         match run(&[key('z'), key('z')]) {
             KeyAction::ScrollCenter(None, false) => {}
             other => panic!("expected ScrollCenter, got {:?}", other),

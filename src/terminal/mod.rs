@@ -7020,6 +7020,16 @@ impl ContentRowDamageCandidate {
     }
 }
 
+/// Status for `&` / `g&`, matching what `:s` itself reports.
+fn report_repeat_substitute(editor: &mut Editor, result: Result<usize, &'static str>) {
+    let message = match result {
+        Err(reason) => reason.to_string(),
+        Ok(0) => "Pattern not found".to_string(),
+        Ok(count) => format!("{count} substitution(s)"),
+    };
+    editor.set_status(message);
+}
+
 /// Handle a key event and update editor state. The active pane's mirror is
 /// synced afterwards whatever path the key took, because the renderer
 /// draws the active window from the pane struct (see
@@ -7597,6 +7607,20 @@ fn handle_normal_mode(editor: &mut Editor, key: KeyEvent) {
 
         KeyAction::JoinLines(count) => {
             editor.join_lines_count(count);
+        }
+
+        // Both run an Ex command underneath (`:&&`, `:%s//~/&`), which `.`
+        // never repeats in Vim, so keep them out of the dot-repeat change.
+        KeyAction::RepeatSubstitute(count) => {
+            let result = editor.repeat_substitute(count);
+            report_repeat_substitute(editor, result);
+            editor.dot_repeat.abandon_candidate();
+        }
+
+        KeyAction::RepeatSubstituteAll => {
+            let result = editor.repeat_substitute_all();
+            report_repeat_substitute(editor, result);
+            editor.dot_repeat.abandon_candidate();
         }
 
         KeyAction::JoinLinesNoSpace(count) => {
@@ -14944,6 +14968,64 @@ mod tests {
         let pane = &editor.panes()[editor.active_pane_idx()];
         assert_eq!(pane.viewport_offset, 0, "the screen draws from the pane");
         assert_eq!(pane.cursor, editor.cursor);
+    }
+
+    fn type_command(editor: &mut Editor, command: &str) {
+        for ch in command.chars() {
+            handle_key(editor, key(ch));
+        }
+        handle_key(editor, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn ampersand_reports_status_like_substitute() {
+        let mut editor = Editor::default();
+        editor.replace_buffer_content("a a\nx\n");
+
+        handle_key(&mut editor, key('&'));
+        assert_eq!(
+            editor.status_message.as_deref(),
+            Some("No previous substitute")
+        );
+
+        type_command(&mut editor, ":s/a/b/");
+        assert_eq!(editor.buffer().content(), "b a\nx\n");
+
+        handle_key(&mut editor, key('&'));
+        assert_eq!(editor.buffer().content(), "b b\nx\n");
+        assert_eq!(editor.status_message.as_deref(), Some("1 substitution(s)"));
+
+        handle_key(&mut editor, key('j'));
+        handle_key(&mut editor, key('&'));
+        assert_eq!(editor.buffer().content(), "b b\nx\n");
+        assert_eq!(editor.status_message.as_deref(), Some("Pattern not found"));
+
+        // A count past the last line is Vim's E16, not a clamp.
+        handle_key(&mut editor, key('5'));
+        handle_key(&mut editor, key('&'));
+        assert_eq!(editor.buffer().content(), "b b\nx\n");
+        assert_eq!(editor.status_message.as_deref(), Some("Invalid range"));
+    }
+
+    #[test]
+    fn last_substitute_is_shared_across_buffers_like_vim() {
+        let root = unique_temp_dir("nevi_ampersand_buffers");
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        std::fs::write(&first, "a\n").expect("write first");
+        std::fs::write(&second, "a a\n").expect("write second");
+
+        let mut editor = Editor::default();
+        editor.open_file(first).expect("open first");
+        type_command(&mut editor, ":s/a/b/g");
+        assert_eq!(editor.buffer().content(), "b\n");
+
+        editor.open_file(second).expect("open second");
+        handle_key(&mut editor, key('&'));
+        assert_eq!(editor.buffer().content(), "b b\n");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

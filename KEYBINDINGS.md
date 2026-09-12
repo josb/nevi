@@ -325,6 +325,8 @@ Operators are commands that wait for a motion. For example, `d` (delete) + `w` (
 | `g*` / `g#` | Same as `*` / `#` but also match inside longer words |
 | `gn` | Search forward and select match |
 | `gN` | Search backward and select match |
+| `&` / `{n}&` | Repeat the last `:s` on the current line (or n lines), keeping its flags like Neovim's default `&` |
+| `g&` | Repeat the last `:s` on every line, keeping its flags |
 
 > **Note:** Search matches literal text and is case sensitive, like Vim with default settings. Regex patterns are not supported yet, with one exception: the word boundary atoms `\<` and `\>` work, so `/\<abc\>` matches `abc` only as a whole word. `*` and `#` search for `\<word\>` like Vim, which is why they skip the word when it sits inside a longer one.
 
