@@ -16,7 +16,7 @@ the test suite enforces, so it cannot drift from what is actually verified.
   - 1 covered as default-keymap plumbing with dedicated tests
 - **619 oracle cases**: motions (160), editing (173), increment (31), insert-entry (17), linewise-operators (39), marks (45), open-line (20), replace (27), search (51), text-objects (30), undo-redo (2), visual (24)
 - **0 tracked coverage gaps**
-- **251 of 458 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
+- **251 of 462 documented keybind rows map to an inventoried keybind**; the rest work today but are not yet individually tracked ([full list below](#documented-but-not-yet-inventoried))
 
 ## How the Vim oracle works
 
@@ -287,7 +287,7 @@ like `dw` are tracked as single inventory entries, so their building-block
 rows may already be covered compositionally.)
 
 <details>
-<summary>207 untracked rows</summary>
+<summary>211 untracked rows</summary>
 
 | Keybind | Behavior |
 |---------|----------|
@@ -450,12 +450,12 @@ rows may already be covered compositionally.)
 | `:Jump` / `:jump` | Start labeled jump mode: type 2 chars, then press a visible label |
 | `:FindBuffers` / `:fb` / `:buffers` | Open buffer finder |
 | `:FindDiagnostics` / `:diag` / `:fd` | Open diagnostics finder |
-| `:DiagnosticFloat` / `:df` | Show diagnostics for cursor line |
+| `:DiagnosticFloat` / `:df` / `:linediag` | Show diagnostics for cursor line |
 | `:GitChanges` / `:gitchanges` / `:changes` / `:gc` | Open changed Git files picker with diff preview; `Enter` opens the selected file |
 | `:Explorer` / `:ex` | Toggle file explorer |
 | `:Explore` / `:Ex` | Open file explorer |
-| `:bn` | Next buffer |
-| `:bp` | Previous buffer |
+| `:bn` / `:bnext` / `:n` / `:next` | Next buffer |
+| `:bp` / `:bprev` / `:N` / `:prev` | Previous buffer |
 | `:bd` / `:bdelete` | Close current buffer (fails if unsaved) |
 | `:bd!` / `:bdelete!` | Force close current buffer |
 | `:vs` / `:vsplit` | Vertical split |
@@ -471,12 +471,16 @@ rows may already be covered compositionally.)
 | `:codeaction` / `:ca` | Show code actions |
 | `:ToolInstall` / `:LspInstall` | Open read-only `[tool-installer]` report with missing LSP/tool install commands |
 | `:Themes` | Open theme picker |
+| `:Keymaps` / `:keys` | Open the searchable keybinding cheatsheet |
+| `:MarkdownPreview` / `:mdp` | Open a rendered Markdown reader for the current `.md` file (`j`/`k`, `Ctrl+d`/`Ctrl+u`, `g`/`G`, `q`) |
+| `:set mouse` / `:set nomouse` / `:set mouse=` | Turn mouse capture on or off for the session |
+| `:set signcolumn={auto,yes,no}` | Show the git/diagnostic gutter always, only while a sign exists, or never |
 | `:Theme {name}` / `:theme {name}` / `:colorscheme {name}` | Set theme |
 | `:LazyGit` / `:lg` | Open lazygit |
 | `:checkhealth` / `:CheckHealth` / `:Health` | Open read-only `[health]` report with config, keymap, profiling, LSP, and external tools |
 | `:FlightRecorder` / `:WhySlow` / `:flight` | Open read-only `[flight-recorder]` report with recent in-memory timing events |
-| `:ConfigOpen` / `:config` / `:configopen` | Open the user config file, creating it first if needed |
-| `:ConfigDefaults` / `:configdefaults` | Open read-only `[config-defaults]` buffer with latest built-in default config |
+| `:ConfigOpen` / `:ConfigEdit` / `:config` | Open the user config file, creating it first if needed |
+| `:ConfigDefaults` / `:defaults` | Open read-only `[config-defaults]` buffer with latest built-in default config |
 | `:!{command}` | Run external shell command |
 | `:Terminal` / `:term` | Toggle floating terminal |
 | `:TerminalNew [name]` / `:termnew [name]` | Create floating terminal session |
