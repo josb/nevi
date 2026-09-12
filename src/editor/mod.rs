@@ -392,6 +392,16 @@ pub struct SearchOrigin {
     pub h_offset: usize,
 }
 
+/// What the last `:s` did, so `&` and `g&` can repeat it. Both keep the
+/// flags: Neovim maps `&` to `:&&` by default (Vim's bare `&` drops them),
+/// and `g&` is `:%s//~/&`.
+#[derive(Debug, Clone)]
+pub struct LastSubstitute {
+    pub pattern: String,
+    pub replacement: String,
+    pub global: bool,
+}
+
 impl SearchState {
     /// Clear the search input
     pub fn clear(&mut self) {
@@ -1076,6 +1086,8 @@ pub struct Editor {
     undo_stacks: Vec<UndoStack>,
     /// Search state
     pub search: SearchState,
+    /// The last `:s`, for `&` and `g&`.
+    pub last_substitute: Option<LastSubstitute>,
     /// Visual selection state
     pub visual: VisualSelection,
     /// Syntax highlighting manager
@@ -1658,6 +1670,7 @@ impl Editor {
             undo_stack: UndoStack::new(),
             undo_stacks: vec![UndoStack::new()],
             search: SearchState::default(),
+            last_substitute: None,
             visual: VisualSelection::default(),
             syntax,
             preview_syntax,
@@ -8016,22 +8029,69 @@ impl Editor {
         entire_file: bool,
         global: bool,
     ) -> usize {
-        if pattern.is_empty() {
-            return 0;
-        }
-
-        // Begin undo group for all replacements
-        self.begin_change();
-
-        let mut total_replacements = 0;
-        let pattern_len = pattern.len();
-
-        // Determine line range
         let (start_line, end_line) = if entire_file {
             (0, self.buffers[self.current_buffer_idx].len_lines())
         } else {
             (self.cursor.line, self.cursor.line + 1)
         };
+        self.substitute_lines(pattern, replacement, start_line, end_line, global)
+    }
+
+    /// `&`: repeat the last `:s` on the cursor line, or on `count` lines
+    /// from it, with its flags (Neovim's default `&` is `:&&`). A count
+    /// that runs past the last line is refused like Vim's `:.,.+N` range
+    /// (E16), not clamped. Returns the substitution count, or the message
+    /// to show when nothing could run.
+    pub fn repeat_substitute(&mut self, count: usize) -> Result<usize, &'static str> {
+        let last = self
+            .last_substitute
+            .clone()
+            .ok_or("No previous substitute")?;
+        let start = self.cursor.line;
+        let end = start + count.max(1);
+        if end > self.buffer().addressable_line_count() {
+            return Err("Invalid range");
+        }
+        Ok(self.substitute_lines(&last.pattern, &last.replacement, start, end, last.global))
+    }
+
+    /// `g&`: repeat the last `:s` on every line, keeping its flags
+    /// (Vim's `:%s//~/&`).
+    pub fn repeat_substitute_all(&mut self) -> Result<usize, &'static str> {
+        let last = self
+            .last_substitute
+            .clone()
+            .ok_or("No previous substitute")?;
+        let end = self.buffer().len_lines();
+        Ok(self.substitute_lines(&last.pattern, &last.replacement, 0, end, last.global))
+    }
+
+    /// Replace `pattern` on lines `start_line..end_line` and remember the
+    /// substitute for `&`. Like Vim, the cursor ends on the first non-blank
+    /// of the last line that changed, and stays put when nothing matched.
+    fn substitute_lines(
+        &mut self,
+        pattern: &str,
+        replacement: &str,
+        start_line: usize,
+        end_line: usize,
+        global: bool,
+    ) -> usize {
+        if pattern.is_empty() {
+            return 0;
+        }
+        self.last_substitute = Some(LastSubstitute {
+            pattern: pattern.to_string(),
+            replacement: replacement.to_string(),
+            global,
+        });
+
+        // Begin undo group for all replacements
+        self.begin_change();
+
+        let mut total_replacements = 0;
+        let mut last_changed_line = None;
+        let pattern_len = pattern.len();
 
         for line_idx in start_line..end_line {
             if let Some(line) = self.buffers[self.current_buffer_idx].line(line_idx) {
@@ -8081,8 +8141,15 @@ impl Editor {
 
                     // Replace the line in buffer
                     self.buffers[self.current_buffer_idx].replace_line(line_idx, &new_line);
+                    last_changed_line = Some(line_idx);
                 }
             }
+        }
+
+        if let Some(line) = last_changed_line {
+            self.cursor.line = line;
+            self.cursor.col = self.find_first_non_blank(line);
+            self.scroll_to_cursor();
         }
 
         // End undo group
