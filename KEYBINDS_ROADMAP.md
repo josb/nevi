@@ -6,6 +6,11 @@ own taste.
 
 **Status: 372 keybinds implemented, 55 planned Vim/Neovim parity defaults.**
 
+The Status line above is the hand-maintained source that the parity report
+reads to build [PARITY.md](PARITY.md). When a planned keybind lands, remove it
+from the tables below, adjust both numbers, and regenerate the scoreboard with
+`NEVI_UPDATE_PARITY=1 cargo test parity_report`.
+
 This file tracks what's **planned** (not yet implemented). For the full list of
 keybinds that already work, see [KEYBINDINGS.md](KEYBINDINGS.md). This list comes
 from a full audit against Vim/Neovim's default keybinds, so an empty roadmap
